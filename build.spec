@@ -1,52 +1,59 @@
-# build.spec  (UPDATED — imageio-ffmpeg integrated)
+# build.spec  — PyInstaller spec for YT Batch Downloader
 # ─────────────────────────────────────────────────────────────────────────────
-# PyInstaller spec for YT Batch Downloader with self-contained FFmpeg.
+# FFmpeg is bundled automatically via imageio-ffmpeg.
+# End users do NOT need to install FFmpeg.
 #
 # Build command (from the ytdl_app/ directory):
 #   pyinstaller build.spec --clean
-#
-# Or use the one-file variant:
-#   pyinstaller --onefile --collect-all imageio_ffmpeg main.py
-#
-# Key change from original spec:
-#   imageio_ffmpeg is collected entirely (binaries + package data) so the
-#   bundled FFmpeg executable is included inside the frozen application.
-#   No end-user installation of FFmpeg is required.
 # ─────────────────────────────────────────────────────────────────────────────
 import os
 import sys
+import glob
 from pathlib import Path
 
-# ── Locate customtkinter assets (themes/images bundled with the package) ─────
+# ── Locate customtkinter assets ───────────────────────────────────────────────
 import customtkinter as _ctk
 CTK_DIR = Path(_ctk.__file__).parent
 
-# ── Locate imageio_ffmpeg data so the FFmpeg binary is bundled ────────────────
+# ── Locate imageio_ffmpeg package + verify the FFmpeg binary is present ───────
 try:
     import imageio_ffmpeg as _iio_ffmpeg
     IIO_FFMPEG_DIR = Path(_iio_ffmpeg.__file__).parent
     _HAS_IMAGEIO_FFMPEG = True
+
+    # Confirm the binary actually exists so we catch problems at build time
+    try:
+        _bundled_exe = _iio_ffmpeg.get_ffmpeg_exe()
+        print(f"[build.spec] imageio-ffmpeg binary: {_bundled_exe}")
+    except Exception as _e:
+        print(f"[build.spec] WARNING: imageio_ffmpeg.get_ffmpeg_exe() failed: {_e}")
+        print("[build.spec]          The bundled FFmpeg may be missing from the output.")
+
 except ImportError:
     IIO_FFMPEG_DIR = None
     _HAS_IMAGEIO_FFMPEG = False
-    print("WARNING: imageio_ffmpeg not installed; FFmpeg binary will NOT be bundled.")
-    print("         Install it with:  pip install imageio-ffmpeg")
+    print("=" * 70)
+    print("ERROR: imageio_ffmpeg is not installed.")
+    print("       FFmpeg will NOT be bundled — users must install it manually.")
+    print("       Fix: pip install imageio-ffmpeg")
+    print("=" * 70)
 
-# ── Icon: use icon.ico if present next to this spec ──────────────────────────
+# ── Icon ──────────────────────────────────────────────────────────────────────
 _SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 _ICON_PATH = os.path.join(_SPEC_DIR, "icon.ico")
 ICON = _ICON_PATH if os.path.isfile(_ICON_PATH) else None
 
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Build the datas list — always include customtkinter; add imageio_ffmpeg if present
+# ── datas list ────────────────────────────────────────────────────────────────
+# Always include customtkinter; add imageio_ffmpeg when available.
 _datas = [
     (str(CTK_DIR), "customtkinter"),
 ]
 if _HAS_IMAGEIO_FFMPEG and IIO_FFMPEG_DIR is not None:
-    # Include the entire imageio_ffmpeg package directory.
-    # This bundles the static FFmpeg binary that ships with the package.
+    # Bundle the entire imageio_ffmpeg package directory.
+    # This includes the "binaries/" sub-folder which holds the static FFmpeg exe.
     _datas.append((str(IIO_FFMPEG_DIR), "imageio_ffmpeg"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 a = Analysis(
     [os.path.join(_SPEC_DIR, "main.py")],
@@ -58,7 +65,7 @@ a = Analysis(
         "imageio_ffmpeg",
         "imageio_ffmpeg._utils",
         "imageio_ffmpeg._definitions",
-        # ── ffmpeg_manager + conversion_worker (new modules) ──────────────────
+        # ── ffmpeg_manager + conversion_worker ────────────────────────────────
         "ffmpeg_manager",
         "conversion_worker",
         # ── CustomTkinter / Tk ────────────────────────────────────────────────
@@ -158,9 +165,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    **({
-        "icon": ICON
-    } if ICON else {}),
+    **({ "icon": ICON } if ICON else {}),
 )
 
 coll = COLLECT(

@@ -1,6 +1,9 @@
-# requirements.txt  (UPDATED)
+# requirements.txt
 # ─────────────────────────────────────────────────────────────────────────────
-# Core dependencies — must install before running or building
+# Install all dependencies with:
+#   pip install -r requirements.txt
+#
+# FFmpeg is provided automatically by imageio-ffmpeg — no manual install needed.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # GUI framework
@@ -12,15 +15,18 @@ yt-dlp>=2024.1.0
 # Image support (thumbnails)
 Pillow>=10.0.0
 
-# ── NEW: Self-contained FFmpeg ────────────────────────────────────────────────
-# Ships a pre-built static FFmpeg binary. No manual installation required.
+# ── Self-contained FFmpeg ─────────────────────────────────────────────────────
+# Ships a pre-built static FFmpeg binary for Windows, macOS, and Linux.
 # get_ffmpeg_path() in ffmpeg_manager.py calls imageio_ffmpeg.get_ffmpeg_exe()
-# which returns the path to this bundled binary.
+# which returns the bundled binary path — no PATH setup required by the user.
 imageio-ffmpeg>=0.4.9
 
 # ── Optional but recommended ──────────────────────────────────────────────────
-# Audio tagging (used by yt-dlp for MP3 metadata embedding)
+# Audio metadata tagging (used by yt-dlp for MP3 metadata embedding)
 mutagen>=1.47.0
 
-# TLS certificate bundle (used by yt-dlp HTTPS requests)
+# TLS certificate bundle (used by yt-dlp for HTTPS requests)
 certifi>=2024.2.2
+
+# ── Build / packaging (dev only) ──────────────────────────────────────────────
+# pyinstaller>=6.0.0   # uncomment when building the distributable .exe

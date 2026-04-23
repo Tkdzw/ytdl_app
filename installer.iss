@@ -7,6 +7,9 @@
 ;   3. Open this file in Inno Setup IDE and press F9 (or Build → Compile)
 ;
 ; Output: installer\YTBatchDownloader_Setup.exe
+;
+; NOTE: FFmpeg is bundled inside the application via imageio-ffmpeg.
+;       End users do NOT need to install FFmpeg separately.
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName      "YT Batch Downloader"
@@ -44,11 +47,11 @@ UninstallDisplayName={#AppName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon";    Description: "Create a &desktop shortcut";     GroupDescription: "Additional icons:"; Flags: unchecked
-Name: "quicklaunchicon"; Description: "Create a &Quick Launch shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
+Name: "desktopicon";     Description: "Create a &desktop shortcut";      GroupDescription: "Additional icons:"; Flags: unchecked
+Name: "quicklaunchicon"; Description: "Create a &Quick Launch shortcut";  GroupDescription: "Additional icons:"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
-; Bundle the entire PyInstaller output folder
+; Bundle the entire PyInstaller output folder (includes imageio-ffmpeg binary)
 Source: "dist\YTBatchDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -65,14 +68,12 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait
 Type: filesandordirs; Name: "{userappdata}\.ytdl_app"
 
 [Code]
-// Show a note about FFmpeg on the finish page
+// Confirm successful install on the finish page
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if CurPageID = wpFinished then
     WizardForm.FinishedLabel.Caption :=
       'Setup has finished installing {#AppName}.' + #13#10 + #13#10 +
-      'IMPORTANT: FFmpeg is required for video merging and MP3 conversion.' + #13#10 +
-      'If you have not installed it yet, download it from:' + #13#10 +
-      '  https://ffmpeg.org/download.html' + #13#10 +
-      'and add it to your system PATH.';
+      'FFmpeg is bundled inside the application — no separate installation required.' + #13#10 + #13#10 +
+      'Click Finish to launch the app.';
 end;

@@ -6,35 +6,32 @@ Self-contained FFmpeg resolver and conversion engine.
 Uses ``imageio-ffmpeg`` to automatically provide a bundled FFmpeg binary,
 eliminating any requirement for end-users to install FFmpeg manually.
 
+Resolution order
+────────────────
+1. imageio_ffmpeg.get_ffmpeg_exe()   ← bundled binary (preferred, zero setup)
+2. sys._MEIPASS bundle               ← PyInstaller frozen build
+3. shutil.which("ffmpeg")            ← system PATH fallback
+
 Public API
 ──────────
     get_ffmpeg_path() -> str
-        Returns the absolute path to the FFmpeg executable. Raises
-        FFmpegNotFoundError on failure.
-
     get_ffmpeg_version() -> str
-        Returns a short human-readable version string, e.g. "7.0".
-
-    convert_to_mp3(input_file, output_file, bitrate, on_progress, on_log)
-        Converts any audio-bearing file to MP3 using subprocess + FFmpeg.
-
-    convert_file(input_file, output_file, format, bitrate, on_progress, on_log)
-        General-purpose conversion that delegates to the correct handler.
-
+    convert_to_mp3(...)
+    convert_to_wav(...)
+    convert_to_mp4(...)
+    convert_file(...)
     detect_format(filepath) -> str
-        Heuristically detects the container format from the file extension.
-
     cleanup_temp_file(filepath)
-        Safely removes a temporary / intermediate file if it still exists.
 
-PyInstaller compatibility
-──────────────────────────
+PyInstaller packaging
+──────────────────────
     Build with:
-        pyinstaller --onefile --collect-all imageio_ffmpeg  your_app.spec
+        pyinstaller build.spec --clean
+    or:
+        pyinstaller --onefile --collect-all imageio_ffmpeg main.py
 
-    At runtime the module auto-detects ``sys._MEIPASS`` and will still
-    call ``imageio_ffmpeg.get_ffmpeg_exe()`` which handles the frozen
-    environment correctly on all platforms.
+    imageio_ffmpeg.get_ffmpeg_exe() handles _MEIPASS natively on all
+    platforms — no extra configuration is needed.
 """
 
 from __future__ import annotations
@@ -46,9 +43,7 @@ import subprocess
 import sys
 from typing import Callable, Optional
 
-# ---------------------------------------------------------------------------
-# Attempt to import imageio_ffmpeg; fall back to system PATH probe if absent
-# ---------------------------------------------------------------------------
+# ── Try to import imageio_ffmpeg; graceful fallback if absent ────────────────
 try:
     import imageio_ffmpeg  # type: ignore[import]
     _IMAGEIO_FFMPEG_AVAILABLE = True
@@ -57,43 +52,41 @@ except ImportError:
 
 _log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Public exception
-# ---------------------------------------------------------------------------
+# ── Public exceptions ─────────────────────────────────────────────────────────
 
 class FFmpegNotFoundError(RuntimeError):
     """Raised when FFmpeg cannot be located by any strategy."""
 
 
-# ---------------------------------------------------------------------------
-# Internal cache
-# ---------------------------------------------------------------------------
+class FFmpegConversionError(RuntimeError):
+    """Raised when the FFmpeg subprocess exits with a non-zero return code."""
 
+    def __init__(self, message: str, returncode: int, stderr: str) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+# ── Internal cache ─────────────────────────────────────────────────────────────
 _cached_ffmpeg_path: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Core: get_ffmpeg_path
-# ---------------------------------------------------------------------------
+# ── Core resolver ──────────────────────────────────────────────────────────────
 
 def get_ffmpeg_path() -> str:
     """
     Return the absolute path to a usable FFmpeg executable.
 
     Resolution order:
-        1. ``imageio_ffmpeg.get_ffmpeg_exe()`` – bundled binary shipped with
-           the ``imageio-ffmpeg`` Python package (always preferred, zero
-           end-user setup required).
-        2. System ``PATH`` via ``shutil.which`` – fallback for environments
-           where imageio-ffmpeg is not installed.
-        3. PyInstaller ``_MEIPASS`` bundle – covers frozen builds where
-           FFmpeg was added manually as a binary data file.
+        1. ``imageio_ffmpeg.get_ffmpeg_exe()``  — bundled binary (zero user setup)
+        2. PyInstaller ``sys._MEIPASS`` bundle  — frozen-app support
+        3. ``shutil.which("ffmpeg")``            — system PATH fallback
 
     Returns:
         str: Absolute path to the FFmpeg executable.
 
     Raises:
-        FFmpegNotFoundError: If no usable FFmpeg binary is found.
+        FFmpegNotFoundError: If no usable FFmpeg binary can be found.
     """
     global _cached_ffmpeg_path
 
@@ -102,27 +95,22 @@ def get_ffmpeg_path() -> str:
 
     path = (
         _resolve_via_imageio_ffmpeg()
-        or _resolve_via_system_path()
         or _resolve_via_pyinstaller_bundle()
+        or _resolve_via_system_path()
     )
 
     if not path:
         raise FFmpegNotFoundError(
-            "FFmpeg could not be located. "
-            "Install the 'imageio-ffmpeg' Python package "
-            "(pip install imageio-ffmpeg) to bundle FFmpeg automatically, "
-            "or ensure ffmpeg is on your system PATH."
+            "FFmpeg could not be located.\n"
+            "This should not happen when imageio-ffmpeg is installed correctly.\n"
+            "Try: pip install --upgrade imageio-ffmpeg\n"
+            "Or ensure ffmpeg is on your system PATH."
         )
 
-    # Validate: run -version to confirm the binary works
     _validate_ffmpeg_binary(path)
-
+    _inject_into_path(os.path.dirname(path))
     _cached_ffmpeg_path = path
     _log.info("FFmpeg resolved: %s", path)
-
-    # Inject directory into PATH so yt-dlp subprocess calls also find it
-    _inject_into_path(os.path.dirname(path))
-
     return path
 
 
@@ -131,7 +119,7 @@ def get_ffmpeg_version() -> str:
     Return a short version string for the resolved FFmpeg binary.
 
     Returns:
-        str: e.g. "7.0" or "6.1.1".  Returns "unknown" if parsing fails.
+        str: e.g. "7.0" or "6.1.1". Returns "unknown" if parsing fails.
     """
     try:
         path = get_ffmpeg_path()
@@ -141,29 +129,23 @@ def get_ffmpeg_version() -> str:
             timeout=8,
         )
         first_line = result.stdout.decode(errors="replace").splitlines()[0]
-        # "ffmpeg version 7.0 Copyright ..."
         match = re.search(r"version\s+([^\s]+)", first_line)
         if match:
             return match.group(1)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _log.warning("Could not determine FFmpeg version: %s", exc)
     return "unknown"
 
 
-# ---------------------------------------------------------------------------
-# Conversion API
-# ---------------------------------------------------------------------------
+# ── Conversion callbacks ───────────────────────────────────────────────────────
 
 ConversionProgressCallback = Callable[[float, str], None]
-"""
-Callback signature:
-    progress_callback(percent: float, elapsed_time: str)
-    - percent:      0.0 – 100.0
-    - elapsed_time: human-readable string like "00:01:23.45"
-"""
+"""(percent: float 0–100, elapsed_time: str like "00:01:23.45")"""
 
 LogCallback = Callable[[str], None]
 
+
+# ── Conversion API ─────────────────────────────────────────────────────────────
 
 def convert_to_mp3(
     input_file: str,
@@ -173,32 +155,8 @@ def convert_to_mp3(
     on_progress: Optional[ConversionProgressCallback] = None,
     on_log: Optional[LogCallback] = None,
 ) -> None:
-    """
-    Convert *input_file* to MP3 and write the result to *output_file*.
-
-    Uses the FFmpeg binary resolved by :func:`get_ffmpeg_path`.  The
-    conversion runs synchronously in the calling thread; use
-    :class:`ConversionWorker` for background execution.
-
-    Args:
-        input_file:   Absolute path to the source media file.
-        output_file:  Absolute path to the destination MP3 file.
-        bitrate:      Audio bitrate string accepted by FFmpeg, e.g. ``"192k"``,
-                      ``"256k"``, ``"320k"``.  Defaults to ``"192k"``.
-        on_progress:  Optional callback receiving (percent, time_str).
-                      Called periodically as FFmpeg reports progress.
-        on_log:       Optional callback receiving a single log line string.
-
-    Raises:
-        FFmpegNotFoundError: If FFmpeg cannot be located.
-        FFmpegConversionError: If the FFmpeg process exits with a non-zero
-                               return code.
-        FileNotFoundError: If *input_file* does not exist.
-        ValueError: If *bitrate* is not a recognised FFmpeg bitrate string.
-    """
-    _log.info(
-        "convert_to_mp3: %s → %s  (bitrate=%s)", input_file, output_file, bitrate
-    )
+    """Convert *input_file* to MP3 at *bitrate*."""
+    _log.info("convert_to_mp3: %s → %s  (bitrate=%s)", input_file, output_file, bitrate)
     _run_conversion(
         input_file=input_file,
         output_file=output_file,
@@ -215,27 +173,12 @@ def convert_to_wav(
     on_progress: Optional[ConversionProgressCallback] = None,
     on_log: Optional[LogCallback] = None,
 ) -> None:
-    """Convert *input_file* to uncompressed WAV (PCM 16-bit, stereo, 44.1 kHz).
-
-    Args:
-        input_file:  Absolute path to source media.
-        output_file: Absolute path to destination WAV file.
-        on_progress: Optional progress callback (percent, time_str).
-        on_log:      Optional line-level log callback.
-
-    Raises:
-        FFmpegNotFoundError, FFmpegConversionError, FileNotFoundError.
-    """
+    """Convert *input_file* to uncompressed WAV (PCM 16-bit stereo 44.1 kHz)."""
     _log.info("convert_to_wav: %s → %s", input_file, output_file)
     _run_conversion(
         input_file=input_file,
         output_file=output_file,
-        extra_args=[
-            "-vn",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
-        ],
+        extra_args=["-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2"],
         on_progress=on_progress,
         on_log=on_log,
     )
@@ -245,26 +188,11 @@ def convert_to_mp4(
     input_file: str,
     output_file: str,
     *,
-    video_bitrate: str = "0",     # "0" = copy if possible, else re-encode
+    video_bitrate: str = "0",
     on_progress: Optional[ConversionProgressCallback] = None,
     on_log: Optional[LogCallback] = None,
 ) -> None:
-    """Re-mux or re-encode *input_file* into an MP4 container.
-
-    When the source is already H.264/AAC the streams are copied without
-    re-encoding (fast).  Otherwise FFmpeg will transcode as needed.
-
-    Args:
-        input_file:     Absolute path to source media.
-        output_file:    Absolute path to destination MP4.
-        video_bitrate:  Target video bitrate, e.g. ``"2000k"``.  Pass
-                        ``"0"`` (default) to attempt stream copy.
-        on_progress:    Optional progress callback (percent, time_str).
-        on_log:         Optional line-level log callback.
-
-    Raises:
-        FFmpegNotFoundError, FFmpegConversionError, FileNotFoundError.
-    """
+    """Re-mux or re-encode *input_file* into an MP4 container."""
     _log.info("convert_to_mp4: %s → %s", input_file, output_file)
     if video_bitrate == "0":
         extra = ["-c:v", "copy", "-c:a", "aac", "-strict", "experimental"]
@@ -279,15 +207,6 @@ def convert_to_mp4(
     )
 
 
-# Supported output formats and their handlers
-_FORMAT_DISPATCH: dict[str, str] = {
-    "mp3": "mp3",
-    "wav": "wav",
-    "mp4": "mp4",
-    "m4a": "m4a",
-}
-
-
 def convert_file(
     input_file: str,
     output_file: str,
@@ -299,23 +218,7 @@ def convert_file(
 ) -> None:
     """
     High-level dispatcher: convert *input_file* to *output_format*.
-
     Supported formats: ``"mp3"``, ``"wav"``, ``"mp4"``, ``"m4a"``.
-
-    Args:
-        input_file:    Absolute path to source media.
-        output_file:   Absolute path to destination file (extension should
-                       match *output_format*).
-        output_format: Target container/codec format (case-insensitive).
-        bitrate:       Audio bitrate for compressed formats, e.g. ``"192k"``.
-        on_progress:   Optional (percent, time_str) progress callback.
-        on_log:        Optional line-level log callback.
-
-    Raises:
-        FFmpegNotFoundError:     If FFmpeg cannot be located.
-        FFmpegConversionError:   If the conversion process fails.
-        FileNotFoundError:       If *input_file* does not exist.
-        ValueError:              If *output_format* is not supported.
     """
     fmt = output_format.lower().strip(".")
     if fmt == "mp3":
@@ -339,37 +242,18 @@ def convert_file(
     else:
         raise ValueError(
             f"Unsupported output format '{output_format}'. "
-            f"Supported: {', '.join(_FORMAT_DISPATCH)}"
+            "Supported: mp3, wav, mp4, m4a"
         )
 
 
 def detect_format(filepath: str) -> str:
-    """
-    Heuristically detect the container format from the file's extension.
-
-    Returns a lowercase extension string without the leading dot,
-    e.g. ``"mp4"``, ``"webm"``, ``"mp3"``.  Returns ``"unknown"`` if the
-    extension cannot be identified.
-
-    Args:
-        filepath: Path to the file (need not exist).
-
-    Returns:
-        str: Lowercase format identifier.
-    """
+    """Return the lowercase file extension without dot, e.g. ``"mp4"``."""
     _, ext = os.path.splitext(filepath)
     return ext.lower().lstrip(".") if ext else "unknown"
 
 
 def cleanup_temp_file(filepath: str) -> None:
-    """
-    Remove a temporary or intermediate file if it exists.
-
-    Silently ignores errors (e.g. file already deleted, permission denied).
-
-    Args:
-        filepath: Absolute path to the file to remove.
-    """
+    """Silently delete *filepath* if it exists."""
     if not filepath:
         return
     try:
@@ -380,25 +264,15 @@ def cleanup_temp_file(filepath: str) -> None:
         _log.warning("Could not clean up %s: %s", filepath, exc)
 
 
-# ---------------------------------------------------------------------------
-# ConversionError
-# ---------------------------------------------------------------------------
-
-class FFmpegConversionError(RuntimeError):
-    """Raised when the FFmpeg subprocess exits with a non-zero return code."""
-
-    def __init__(self, message: str, returncode: int, stderr: str) -> None:
-        super().__init__(message)
-        self.returncode = returncode
-        self.stderr = stderr
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+# ── Internal resolvers ─────────────────────────────────────────────────────────
 
 def _resolve_via_imageio_ffmpeg() -> Optional[str]:
-    """Try imageio_ffmpeg first; it ships its own static build."""
+    """
+    Ask imageio_ffmpeg for its bundled FFmpeg binary.
+
+    Works in both normal Python environments and PyInstaller frozen builds —
+    imageio_ffmpeg.get_ffmpeg_exe() handles _MEIPASS path remapping internally.
+    """
     if not _IMAGEIO_FFMPEG_AVAILABLE:
         _log.debug("imageio_ffmpeg not installed; skipping bundled FFmpeg probe.")
         return None
@@ -407,34 +281,48 @@ def _resolve_via_imageio_ffmpeg() -> Optional[str]:
         if path and os.path.isfile(path):
             _log.debug("imageio_ffmpeg provided FFmpeg at: %s", path)
             return path
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("imageio_ffmpeg.get_ffmpeg_exe() failed: %s", exc)
-    return None
-
-
-def _resolve_via_system_path() -> Optional[str]:
-    """Probe system PATH using shutil.which."""
-    import shutil
-    found = shutil.which("ffmpeg")
-    if found:
-        _log.debug("FFmpeg found on system PATH: %s", found)
-        return found
+        _log.warning("imageio_ffmpeg.get_ffmpeg_exe() returned non-existent path: %s", path)
+    except Exception as exc:
+        _log.warning("imageio_ffmpeg.get_ffmpeg_exe() raised: %s", exc)
     return None
 
 
 def _resolve_via_pyinstaller_bundle() -> Optional[str]:
-    """Search inside a PyInstaller _MEIPASS bundle directory."""
+    """
+    Search for an FFmpeg binary inside a PyInstaller _MEIPASS directory.
+
+    This covers cases where FFmpeg was bundled manually as a binary data
+    file (e.g. via ``binaries=[("ffmpeg.exe", ".")]`` in the spec), rather
+    than through imageio_ffmpeg's own data directory.
+    """
     if not getattr(sys, "frozen", False):
         return None
     base = getattr(sys, "_MEIPASS", "")
     if not base:
         return None
     exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-    for sub in ("", "ffmpeg", "bin"):
-        candidate = os.path.join(base, sub, exe_name) if sub else os.path.join(base, exe_name)
+    # Check common sub-directories: root, imageio_ffmpeg/binaries, ffmpeg/, bin/
+    search_dirs = [
+        base,
+        os.path.join(base, "imageio_ffmpeg", "binaries"),
+        os.path.join(base, "ffmpeg"),
+        os.path.join(base, "bin"),
+    ]
+    for directory in search_dirs:
+        candidate = os.path.join(directory, exe_name)
         if os.path.isfile(candidate):
             _log.debug("FFmpeg found in PyInstaller bundle: %s", candidate)
             return candidate
+    return None
+
+
+def _resolve_via_system_path() -> Optional[str]:
+    """Probe system PATH using shutil.which (last-resort fallback)."""
+    import shutil
+    found = shutil.which("ffmpeg")
+    if found:
+        _log.debug("FFmpeg found on system PATH: %s", found)
+        return found
     return None
 
 
@@ -449,7 +337,7 @@ def _validate_ffmpeg_binary(path: str) -> None:
         if result.returncode != 0:
             raise FFmpegNotFoundError(
                 f"FFmpeg at '{path}' returned exit code {result.returncode} "
-                f"when invoked with -version."
+                "when invoked with -version."
             )
         first_line = result.stdout.decode(errors="replace").splitlines()[0]
         _log.debug("FFmpeg validated: %s", first_line)
@@ -468,10 +356,17 @@ def _inject_into_path(directory: str) -> None:
     if not directory:
         return
     current = os.environ.get("PATH", "")
-    if directory.lower() not in current.lower():
+    # Case-insensitive check on Windows
+    if sys.platform == "win32":
+        exists = directory.lower() in current.lower()
+    else:
+        exists = directory in current
+    if not exists:
         os.environ["PATH"] = directory + os.pathsep + current
         _log.debug("Injected into PATH: %s", directory)
 
+
+# ── Subprocess conversion core ─────────────────────────────────────────────────
 
 def _run_conversion(
     *,
@@ -482,26 +377,10 @@ def _run_conversion(
     on_log: Optional[LogCallback],
 ) -> None:
     """
-    Core subprocess wrapper for all FFmpeg conversions.
+    Core FFmpeg subprocess wrapper used by all convert_* functions.
 
-    Builds the command:
-        ffmpeg -y -i <input_file> <extra_args> <output_file>
-
-    Parses ``time=HH:MM:SS.ss`` from stderr to derive progress percentage
-    (requires knowing the duration — obtained via a quick ffprobe call).
-    Falls back to indeterminate progress if duration is unavailable.
-
-    Args:
-        input_file:   Source file path.
-        output_file:  Destination file path (created/overwritten).
-        extra_args:   Additional FFmpeg flags inserted between -i and output.
-        on_progress:  Optional (percent, time_str) callback.
-        on_log:       Optional single-line log callback.
-
-    Raises:
-        FileNotFoundError:      If input_file does not exist.
-        FFmpegConversionError:  If FFmpeg exits non-zero.
-        FFmpegNotFoundError:    If FFmpeg binary cannot be found.
+    Parses ``time=HH:MM:SS.ss`` from stderr to emit progress callbacks.
+    Total duration is probed via ffprobe (or ffmpeg -i) before conversion.
     """
     if not os.path.isfile(input_file):
         raise FileNotFoundError(f"Input file does not exist: {input_file}")
@@ -510,14 +389,13 @@ def _run_conversion(
     output_dir = os.path.dirname(os.path.abspath(output_file))
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get total duration for progress calculation
     duration_secs = _probe_duration(ffmpeg, input_file)
 
     cmd = [ffmpeg, "-y", "-i", input_file] + extra_args + [output_file]
     _log.debug("FFmpeg command: %s", " ".join(cmd))
 
     if on_log:
-        on_log(f"[ffmpeg] Starting: {' '.join(cmd)}")
+        on_log(f"[ffmpeg] {' '.join(cmd)}")
 
     stderr_lines: list[str] = []
 
@@ -531,7 +409,6 @@ def _run_conversion(
             errors="replace",
         )
 
-        # Read stderr line by line so we can parse progress in real-time
         for line in process.stderr:  # type: ignore[union-attr]
             line = line.rstrip()
             stderr_lines.append(line)
@@ -545,7 +422,7 @@ def _run_conversion(
                 if time_str:
                     elapsed = _parse_time_to_seconds(time_str)
                     pct = (elapsed / duration_secs * 100.0) if duration_secs > 0 else 0.0
-                    pct = min(pct, 99.0)   # reserve 100 % for confirmed completion
+                    pct = min(pct, 99.0)
                     on_progress(pct, time_str)
 
         process.wait()
@@ -574,17 +451,14 @@ def _run_conversion(
         on_progress(100.0, "done")
 
     _log.info(
-        "Conversion complete: %s → %s", os.path.basename(input_file), os.path.basename(output_file)
+        "Conversion complete: %s → %s",
+        os.path.basename(input_file), os.path.basename(output_file),
     )
 
 
 def _probe_duration(ffmpeg_path: str, filepath: str) -> float:
-    """Return the duration of *filepath* in seconds using ffprobe/ffmpeg.
-
-    Returns 0.0 if the duration cannot be determined (progress will be
-    reported as indeterminate in that case).
-    """
-    # Prefer ffprobe if it lives next to ffmpeg
+    """Return duration of *filepath* in seconds; 0.0 if unknown."""
+    # Prefer ffprobe alongside ffmpeg
     ffprobe = os.path.join(
         os.path.dirname(ffmpeg_path),
         "ffprobe.exe" if sys.platform == "win32" else "ffprobe",
@@ -598,12 +472,11 @@ def _probe_duration(ffmpeg_path: str, filepath: str) -> float:
              "-of", "default=noprint_wrappers=1:nokey=1", filepath],
             capture_output=True, timeout=8, text=True, errors="replace",
         )
-        duration = float(result.stdout.strip())
-        return duration
+        return float(result.stdout.strip())
     except Exception:
         pass
 
-    # Fallback: parse duration from ffmpeg stderr on a short probe
+    # Fallback: parse from ffmpeg -i stderr
     try:
         result = subprocess.run(
             [ffmpeg_path, "-i", filepath],
@@ -620,13 +493,11 @@ def _probe_duration(ffmpeg_path: str, filepath: str) -> float:
 
 
 def _extract_time(line: str) -> Optional[str]:
-    """Extract the ``time=HH:MM:SS.ss`` value from an FFmpeg progress line."""
     match = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
     return match.group(1) if match else None
 
 
 def _parse_time_to_seconds(time_str: str) -> float:
-    """Convert ``HH:MM:SS.ss`` to a float number of seconds."""
     try:
         parts = time_str.split(":")
         h, m, s = int(parts[0]), int(parts[1]), float(parts[2])

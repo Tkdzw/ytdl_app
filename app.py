@@ -1,12 +1,8 @@
 """
-YouTube Batch Downloader – Application Root (UPDATED)
+YouTube Batch Downloader – Application Root
 ─────────────────────────────────────────────────────────────────────────────
-Changes from original:
-  • Replaces the manual FFmpegChecker with ffmpeg_manager.get_ffmpeg_path()
-    which uses imageio-ffmpeg for zero-install FFmpeg delivery.
-  • Falls back gracefully to the legacy FFmpegChecker if imageio-ffmpeg is
-    not installed (backward-compatible).
-  • Stores the resolved ffmpeg directory in settings so yt-dlp can use it.
+FFmpeg is provided automatically via imageio-ffmpeg (zero user setup).
+Falls back to system PATH / legacy FFmpegChecker if imageio-ffmpeg is absent.
 """
 import customtkinter as ctk
 
@@ -38,7 +34,7 @@ class YouTubeBatchDownloader(ctk.CTk):
             import os
             ffmpeg_dir = os.path.dirname(ffmpeg_path)
             self.settings.set("_ffmpeg_location", ffmpeg_dir)
-            self.logger.info("FFmpeg location for yt-dlp: %s", ffmpeg_dir)
+            self.logger.info("FFmpeg location stored for yt-dlp: %s", ffmpeg_dir)
 
         # ── Appearance ────────────────────────────────────────────────────────
         mode = self.settings.get("appearance_mode")
@@ -59,6 +55,7 @@ class YouTubeBatchDownloader(ctk.CTk):
         )
         self._main_window.pack(fill="both", expand=True)
 
+        # Only show the warning if FFmpeg truly could not be found
         if not self.ffmpeg_ok:
             self.after(300, self._show_ffmpeg_warning)
 
@@ -71,23 +68,33 @@ class YouTubeBatchDownloader(ctk.CTk):
 
     def _resolve_ffmpeg(self) -> tuple[bool, str | None]:
         """
-        Try imageio-ffmpeg first, then fall back to the legacy FFmpegChecker.
+        Resolve FFmpeg using a two-strategy cascade:
+
+        Strategy 1: ffmpeg_manager (uses imageio-ffmpeg bundled binary).
+                    This is the primary path — zero user setup required.
+        Strategy 2: Legacy FFmpegChecker (system PATH, WinGet, Scoop, etc.)
+                    Retained for environments where imageio-ffmpeg is absent.
 
         Returns:
             (ffmpeg_ok: bool, ffmpeg_path: str | None)
         """
-        # ── Strategy 1: imageio-ffmpeg (bundled binary, zero user setup) ─────
+        # ── Strategy 1: imageio-ffmpeg bundled binary ─────────────────────────
         try:
             from ffmpeg_manager import get_ffmpeg_path, FFmpegNotFoundError
             path = get_ffmpeg_path()
             self.logger.info("FFmpeg resolved via imageio-ffmpeg: %s", path)
             return True, path
         except ImportError:
-            self.logger.debug("ffmpeg_manager not available; trying legacy checker.")
+            self.logger.warning(
+                "ffmpeg_manager module not found. "
+                "Ensure ffmpeg_manager.py is present in the project root."
+            )
         except Exception as exc:
-            self.logger.warning("ffmpeg_manager failed (%s); trying legacy checker.", exc)
+            self.logger.warning(
+                "ffmpeg_manager failed (%s); falling back to legacy checker.", exc
+            )
 
-        # ── Strategy 2: Legacy FFmpegChecker (system PATH / WinGet / etc.) ───
+        # ── Strategy 2: Legacy FFmpegChecker ─────────────────────────────────
         try:
             from utils.ffmpeg_checker import FFmpegChecker
             ok = FFmpegChecker.check()
@@ -95,7 +102,10 @@ class YouTubeBatchDownloader(ctk.CTk):
             if ok:
                 self.logger.info("FFmpeg resolved via legacy checker: %s", path)
             else:
-                self.logger.warning("FFmpeg not found by any strategy.")
+                self.logger.error(
+                    "FFmpeg not found by any strategy. "
+                    "Install imageio-ffmpeg: pip install imageio-ffmpeg"
+                )
             return ok, path
         except Exception as exc:
             self.logger.error("Legacy FFmpegChecker raised: %s", exc)

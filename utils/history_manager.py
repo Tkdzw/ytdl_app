@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from utils.logger import AppLogger
 
@@ -52,6 +52,20 @@ class HistoryManager:
         """Return all history records (newest first)."""
         with self._lock:
             return self._read()
+
+    def get_latest_entry(self, url: str) -> Optional[dict[str, Any]]:
+        """
+        Return the most recent history entry matching *url*, or None.
+        Used by the post-download conversion trigger to look up the
+        saved filepath after a successful download.
+        """
+        with self._lock:
+            records = self._read()
+        # Records are stored newest-first; the first match is the latest.
+        for record in records:
+            if record.get("url") == url:
+                return record
+        return None
 
     def clear(self) -> None:
         """Wipe all history."""
