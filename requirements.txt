@@ -1,3 +1,26 @@
+# requirements.txt  (UPDATED)
+# ─────────────────────────────────────────────────────────────────────────────
+# Core dependencies — must install before running or building
+# ─────────────────────────────────────────────────────────────────────────────
+
+# GUI framework
 customtkinter>=5.2.0
+
+# YouTube / media downloader
 yt-dlp>=2024.1.0
+
+# Image support (thumbnails)
 Pillow>=10.0.0
+
+# ── NEW: Self-contained FFmpeg ────────────────────────────────────────────────
+# Ships a pre-built static FFmpeg binary. No manual installation required.
+# get_ffmpeg_path() in ffmpeg_manager.py calls imageio_ffmpeg.get_ffmpeg_exe()
+# which returns the path to this bundled binary.
+imageio-ffmpeg>=0.4.9
+
+# ── Optional but recommended ──────────────────────────────────────────────────
+# Audio tagging (used by yt-dlp for MP3 metadata embedding)
+mutagen>=1.47.0
+
+# TLS certificate bundle (used by yt-dlp HTTPS requests)
+certifi>=2024.2.2

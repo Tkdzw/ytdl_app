@@ -1,10 +1,16 @@
 """
-YouTube Batch Downloader - Application Root
+YouTube Batch Downloader – Application Root (UPDATED)
+─────────────────────────────────────────────────────────────────────────────
+Changes from original:
+  • Replaces the manual FFmpegChecker with ffmpeg_manager.get_ffmpeg_path()
+    which uses imageio-ffmpeg for zero-install FFmpeg delivery.
+  • Falls back gracefully to the legacy FFmpegChecker if imageio-ffmpeg is
+    not installed (backward-compatible).
+  • Stores the resolved ffmpeg directory in settings so yt-dlp can use it.
 """
 import customtkinter as ctk
 
 from ui.main_window import MainWindow
-from utils.ffmpeg_checker import FFmpegChecker
 from utils.logger import AppLogger
 from utils.history_manager import HistoryManager
 from utils.settings_manager import SettingsManager
@@ -25,19 +31,14 @@ class YouTubeBatchDownloader(ctk.CTk):
         self.settings = SettingsManager()
         self.history  = HistoryManager()
 
-        # FFmpegChecker.check() also injects the discovered dir into PATH,
-        # so yt-dlp subprocess calls will find ffmpeg automatically.
-        self.ffmpeg_ok: bool = FFmpegChecker.check()
+        # ── Resolve FFmpeg (imageio-ffmpeg first, legacy checker as fallback) ─
+        self.ffmpeg_ok, ffmpeg_path = self._resolve_ffmpeg()
 
-        # Store the resolved absolute path so the download engine can pass
-        # it to yt-dlp via ffmpeg_location — works even when ffmpeg is NOT
-        # on the system PATH (WinGet versioned folders, Scoop shims, etc.)
-        ffmpeg_path = FFmpegChecker.get_path()
         if ffmpeg_path:
             import os
-            # Store just the directory; yt-dlp's ffmpeg_location wants a dir
-            self.settings.set("_ffmpeg_location", os.path.dirname(ffmpeg_path))
-            self.logger.info("FFmpeg location for yt-dlp: %s", os.path.dirname(ffmpeg_path))
+            ffmpeg_dir = os.path.dirname(ffmpeg_path)
+            self.settings.set("_ffmpeg_location", ffmpeg_dir)
+            self.logger.info("FFmpeg location for yt-dlp: %s", ffmpeg_dir)
 
         # ── Appearance ────────────────────────────────────────────────────────
         mode = self.settings.get("appearance_mode")
@@ -65,6 +66,40 @@ class YouTubeBatchDownloader(ctk.CTk):
             "App started  |  FFmpeg OK: %s  |  Theme: %s",
             self.ffmpeg_ok, mode,
         )
+
+    # ── FFmpeg resolution ─────────────────────────────────────────────────────
+
+    def _resolve_ffmpeg(self) -> tuple[bool, str | None]:
+        """
+        Try imageio-ffmpeg first, then fall back to the legacy FFmpegChecker.
+
+        Returns:
+            (ffmpeg_ok: bool, ffmpeg_path: str | None)
+        """
+        # ── Strategy 1: imageio-ffmpeg (bundled binary, zero user setup) ─────
+        try:
+            from ffmpeg_manager import get_ffmpeg_path, FFmpegNotFoundError
+            path = get_ffmpeg_path()
+            self.logger.info("FFmpeg resolved via imageio-ffmpeg: %s", path)
+            return True, path
+        except ImportError:
+            self.logger.debug("ffmpeg_manager not available; trying legacy checker.")
+        except Exception as exc:
+            self.logger.warning("ffmpeg_manager failed (%s); trying legacy checker.", exc)
+
+        # ── Strategy 2: Legacy FFmpegChecker (system PATH / WinGet / etc.) ───
+        try:
+            from utils.ffmpeg_checker import FFmpegChecker
+            ok = FFmpegChecker.check()
+            path = FFmpegChecker.get_path() if ok else None
+            if ok:
+                self.logger.info("FFmpeg resolved via legacy checker: %s", path)
+            else:
+                self.logger.warning("FFmpeg not found by any strategy.")
+            return ok, path
+        except Exception as exc:
+            self.logger.error("Legacy FFmpegChecker raised: %s", exc)
+            return False, None
 
     def _show_ffmpeg_warning(self) -> None:
         from ui.dialogs import show_ffmpeg_warning

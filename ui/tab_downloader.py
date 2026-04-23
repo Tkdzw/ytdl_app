@@ -1,6 +1,11 @@
 """
-UI Tab: Downloader — URL input, mode selector, progress display.
-Reads defaults from SettingsManager; validates URLs before queueing.
+UI Tab: Downloader — URL input, mode selector, progress display (UPDATED).
+─────────────────────────────────────────────────────────────────────────────
+Changes from original:
+  • "Convert after download" panel wired to ConversionWorker.
+  • Format/bitrate selectors added for post-download conversion.
+  • Conversion progress fed into the same progress bar and log widget.
+  • FFmpeg path is sourced from ffmpeg_manager (no user install required).
 """
 from __future__ import annotations
 
@@ -45,6 +50,10 @@ class DownloaderTab(ctk.CTkFrame):
         self._worker: Optional[DownloadWorker] = None
         self._is_downloading = False
         self._queue_items: list[dict] = []
+
+        # Conversion state
+        self._conv_worker = None
+        self._is_converting = False
 
         self._build()
 
@@ -134,6 +143,9 @@ class DownloaderTab(ctk.CTkFrame):
         ctk.CTkButton(
             controls, text="Browse", width=70, command=self._browse_folder
         ).pack(side="left")
+
+        # ── NEW: Post-download conversion panel ───────────────────────────────
+        self._build_conversion_panel()
 
         # ── Action buttons ────────────────────────────────────────────────────
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -230,6 +242,85 @@ class DownloaderTab(ctk.CTkFrame):
         )
         self._log_box.pack(fill="both", expand=True, padx=24, pady=(4, 20))
 
+    def _build_conversion_panel(self) -> None:
+        """Build the optional post-download conversion sub-panel."""
+        conv_frame = ctk.CTkFrame(self, fg_color=("gray92", "#1A1A2E"), corner_radius=8)
+        conv_frame.pack(fill="x", padx=24, pady=(0, 8))
+
+        header_row = ctk.CTkFrame(conv_frame, fg_color="transparent")
+        header_row.pack(fill="x", padx=16, pady=(10, 6))
+
+        ctk.CTkLabel(
+            header_row,
+            text="🔄  Post-download Conversion  (powered by imageio-ffmpeg)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+
+        # Enable / disable toggle
+        self._conv_enabled_var = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(
+            header_row,
+            text="Enable",
+            variable=self._conv_enabled_var,
+            onvalue=True,
+            offvalue=False,
+            width=80,
+            command=self._on_conv_toggle,
+        ).pack(side="right")
+
+        # Options row (hidden when disabled)
+        self._conv_options_frame = ctk.CTkFrame(conv_frame, fg_color="transparent")
+        self._conv_options_frame.pack(fill="x", padx=16, pady=(0, 10))
+
+        ctk.CTkLabel(
+            self._conv_options_frame,
+            text="Format:",
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+
+        self._conv_format_var = ctk.StringVar(value="mp3")
+        ctk.CTkSegmentedButton(
+            self._conv_options_frame,
+            values=["mp3", "wav", "mp4", "m4a"],
+            variable=self._conv_format_var,
+            width=220,
+        ).pack(side="left", padx=(8, 24))
+
+        ctk.CTkLabel(
+            self._conv_options_frame,
+            text="Bitrate:",
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+
+        self._conv_bitrate_var = ctk.StringVar(value="192k")
+        ctk.CTkSegmentedButton(
+            self._conv_options_frame,
+            values=["128k", "192k", "256k", "320k"],
+            variable=self._conv_bitrate_var,
+            width=220,
+        ).pack(side="left", padx=(8, 24))
+
+        self._del_source_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self._conv_options_frame,
+            text="Delete source after conversion",
+            variable=self._del_source_var,
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left")
+
+        # Start hidden
+        self._conv_options_frame.pack_forget()
+
+    # ── Conversion panel toggle ────────────────────────────────────────────────
+
+    def _on_conv_toggle(self) -> None:
+        if self._conv_enabled_var.get():
+            self._conv_options_frame.pack(fill="x", padx=16, pady=(0, 10))
+            self._log_ui("🔄 Post-download conversion enabled.")
+        else:
+            self._conv_options_frame.pack_forget()
+            self._log_ui("🔄 Post-download conversion disabled.")
+
     # ── URL validation ────────────────────────────────────────────────────────
 
     def _validate_urls_live(self) -> None:
@@ -249,7 +340,6 @@ class DownloaderTab(ctk.CTkFrame):
                 parts.append(f"   · {r.url[:60]}  ({r.reason})")
         self._validation_label.configure(text="\n".join(parts))
 
-        # Fetch thumbnail for first valid YouTube URL
         if valid:
             first_url = valid[0].url
             if "youtube" in first_url or "youtu.be" in first_url:
@@ -324,6 +414,10 @@ class DownloaderTab(ctk.CTkFrame):
         self._set_downloading(True)
         self._log_ui(f"▶ Starting {len(requests)} download(s)…")
 
+        # Store output dir and conversion settings for the post-download step
+        self._pending_output_dir = output_dir
+        self._pending_requests = requests
+
         self._worker = DownloadWorker(
             requests=requests,
             on_progress=self._thread_safe_progress,
@@ -356,6 +450,8 @@ class DownloaderTab(ctk.CTkFrame):
         if self._worker:
             self._worker.stop()
             self._log_ui("⏹ Cancellation requested…")
+        if self._conv_worker:
+            self._conv_worker.stop()
 
     def _ask_format(self, url: str) -> Optional[str]:
         dlg = FormatDialog(self.winfo_toplevel(), url)
@@ -367,10 +463,69 @@ class DownloaderTab(ctk.CTkFrame):
         self._log_box.delete("1.0", "end")
         self._log_box.configure(state="disabled")
 
+    # ── Post-download conversion ──────────────────────────────────────────────
+
+    def _start_conversion_batch(self, completed_results: list[DownloadResult]) -> None:
+        """
+        If conversion is enabled, start a ConversionWorker for all
+        successfully downloaded files.
+        """
+        if not self._conv_enabled_var.get():
+            return
+
+        successful = [r for r in completed_results if r.success and r.filepath]
+        if not successful:
+            self._log_ui("🔄 No files to convert.")
+            return
+
+        output_format = self._conv_format_var.get()
+        bitrate = self._conv_bitrate_var.get()
+        delete_source = self._del_source_var.get()
+
+        try:
+            from conversion_worker import ConversionRequest, ConversionWorker
+        except ImportError:
+            self._log_ui("❌ conversion_worker module not found — skipping conversion.")
+            return
+
+        conv_requests = []
+        for result in successful:
+            import os
+            base, _ = os.path.splitext(result.filepath)
+            out = f"{base}.{output_format}"
+            conv_requests.append(
+                ConversionRequest(
+                    input_file=result.filepath,
+                    output_file=out,
+                    output_format=output_format,
+                    bitrate=bitrate,
+                    delete_source=delete_source,
+                )
+            )
+
+        self._log_ui(
+            f"🔄 Starting conversion of {len(conv_requests)} file(s) "
+            f"to {output_format.upper()} @ {bitrate}…"
+        )
+        self._status_label.configure(text="Converting…", text_color="#DCDCAA")
+        self._cancel_btn.configure(state="normal")
+
+        self._conv_worker = ConversionWorker(
+            requests=conv_requests,
+            on_progress=self._thread_safe_conv_progress,
+            on_item_done=self._thread_safe_conv_done,
+            on_log=self._thread_safe_log,
+            on_all_done=self._thread_safe_conv_all_done,
+        )
+        self._conv_worker.start()
+
     # ── Thread-safe callbacks ─────────────────────────────────────────────────
 
     def _thread_safe_progress(self, data: ProgressData) -> None:
         self.after(0, self._apply_progress, data)
+
+    def _thread_safe_conv_progress(self, percent: float, time_str: str) -> None:
+        self.after(0, self._apply_conv_progress, percent, time_str)
 
     def _thread_safe_item_start(self, url: str, index: int, total: int) -> None:
         self.after(0, self._apply_item_start, url, index, total)
@@ -378,11 +533,17 @@ class DownloaderTab(ctk.CTkFrame):
     def _thread_safe_item_done(self, result: DownloadResult) -> None:
         self.after(0, self._apply_item_done, result)
 
+    def _thread_safe_conv_done(self, result) -> None:
+        self.after(0, self._apply_conv_done, result)
+
     def _thread_safe_log(self, msg: str) -> None:
         self.after(0, self._log_ui, msg)
 
     def _thread_safe_all_done(self) -> None:
         self.after(0, self._apply_all_done)
+
+    def _thread_safe_conv_all_done(self) -> None:
+        self.after(0, self._apply_conv_all_done)
 
     # ── UI updates (main thread) ──────────────────────────────────────────────
 
@@ -397,10 +558,15 @@ class DownloaderTab(ctk.CTkFrame):
         else:
             self._status_label.configure(text="Downloading", text_color="#4EC9B0")
 
+    def _apply_conv_progress(self, percent: float, time_str: str) -> None:
+        self._progress_bar.set(percent / 100.0)
+        self._pct_label.configure(text=f"{percent:.0f}%")
+        self._speed_label.configure(text=f"Time: {time_str}")
+        self._status_label.configure(text="Converting…", text_color="#DCDCAA")
+
     def _apply_item_start(self, url: str, index: int, total: int) -> None:
         short = url if len(url) <= 55 else url[:52] + "…"
         self._current_item_label.configure(text=f"[{index}/{total}] {short}")
-        # Update queue row status to Downloading
         for item in self._queue_items:
             if item["url"] == url:
                 item["status"] = "Downloading"
@@ -433,11 +599,60 @@ class DownloaderTab(ctk.CTkFrame):
         if self._on_queue_update:
             self._on_queue_update(self._queue_items)
 
+    def _apply_conv_done(self, result) -> None:
+        import os
+        name = os.path.basename(result.request.output_file)
+        if result.success:
+            self._log_ui(f"🔄 Converted: {name}")
+        else:
+            self._log_ui(f"❌ Conversion failed: {name}\n   {result.error_message}")
+
     def _apply_all_done(self) -> None:
+        """Called when the download batch completes. May kick off conversion."""
+        completed_results = []
+        # Collect results from queue items that are now completed
+        # The items were stored in _apply_item_done; collect what we have
         self._set_downloading(False)
         self._log_ui("🏁 All downloads finished.")
         self._status_label.configure(text="Done", text_color="#4CAF50")
         self._current_item_label.configure(text="")
+
+        # Trigger conversion if enabled
+        if self._conv_enabled_var.get():
+            # We need to collect the successfully downloaded filepaths.
+            # Re-derive from the queue items using the output directory.
+            self._trigger_conversion_if_needed()
+
+    def _trigger_conversion_if_needed(self) -> None:
+        """Start post-download conversion for queued completed items."""
+        import os
+        from engine.downloader import DownloadResult
+
+        # Build pseudo-results from queue items that succeeded
+        pseudo_results = []
+        output_dir = getattr(self, "_pending_output_dir", _DEFAULT_OUTPUT_DIR)
+        for item in self._queue_items:
+            if item["status"] == "Completed":
+                # We don't have the exact filepath; use the stored result
+                # from history (last entry for this URL)
+                entry = self._history.get_latest_entry(item["url"])
+                if entry and entry.get("filepath"):
+                    pseudo_results.append(
+                        DownloadResult(
+                            url=item["url"],
+                            title=item.get("fmt", ""),
+                            filepath=entry["filepath"],
+                            success=True,
+                        )
+                    )
+        if pseudo_results:
+            self._start_conversion_batch(pseudo_results)
+
+    def _apply_conv_all_done(self) -> None:
+        self._set_downloading(False)
+        self._cancel_btn.configure(state="disabled")
+        self._log_ui("🔄 All conversions finished.")
+        self._status_label.configure(text="Done", text_color="#4CAF50")
 
     def _set_downloading(self, state: bool) -> None:
         self._is_downloading = state
