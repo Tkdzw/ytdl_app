@@ -1,11 +1,10 @@
 """
-YouTube Batch Downloader – Application Root
-─────────────────────────────────────────────────────────────────────────────
-Startup sequence:
-  1. Resolve FFmpeg  via imageio-ffmpeg (zero install)
-  2. Detect JS runtime (node/qjs/deno/bun) for yt-dlp's YouTube extractor
-  3. Store both in SettingsManager so DownloadEngine picks them up
+YouTube Batch Downloader - Application Root
 """
+from __future__ import annotations
+
+import shutil
+
 import customtkinter as ctk
 
 from ui.main_window import MainWindow
@@ -24,19 +23,14 @@ class YouTubeBatchDownloader(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
 
-        # ── Shared services ───────────────────────────────────────────────────
         self.logger   = AppLogger.get_logger(__name__)
         self.settings = SettingsManager()
         self.history  = HistoryManager()
 
-        # ── Resolve FFmpeg ────────────────────────────────────────────────────
-        self.ffmpeg_ok, ffmpeg_path = self._resolve_ffmpeg()
-        if ffmpeg_path:
-            import os
-            self.settings.set("_ffmpeg_location", os.path.dirname(ffmpeg_path))
-            self.logger.info("FFmpeg location: %s", os.path.dirname(ffmpeg_path))
+        # ── Validate saved FFmpeg path, fall back to PATH ─────────────────────
+        self.ffmpeg_ok = self._check_ffmpeg()
 
-        # ── Detect JS runtime for yt-dlp ──────────────────────────────────────
+        # ── Detect JS runtime ─────────────────────────────────────────────────
         self.js_runtime = self._detect_js_runtime()
 
         # ── Appearance ────────────────────────────────────────────────────────
@@ -59,63 +53,82 @@ class YouTubeBatchDownloader(ctk.CTk):
         )
         self._main_window.pack(fill="both", expand=True)
 
-        # Deferred warnings (after mainloop starts)
         if not self.ffmpeg_ok:
             self.after(300, self._show_ffmpeg_warning)
         elif not self.js_runtime.available:
             self.after(500, self._show_js_runtime_warning)
 
         self.logger.info(
-            "App started  |  FFmpeg OK: %s  |  JS runtime: %s  |  Theme: %s",
+            "App started | FFmpeg OK: %s | JS runtime: %s | Theme: %s",
             self.ffmpeg_ok,
-            f"{self.js_runtime.name} v{self.js_runtime.version}" if self.js_runtime.available else "none",
+            f"{self.js_runtime.name} v{self.js_runtime.version}"
+            if self.js_runtime.available else "none",
             mode,
         )
 
-    # ── FFmpeg resolution ─────────────────────────────────────────────────────
+    # ── FFmpeg check ──────────────────────────────────────────────────────────
 
-    def _resolve_ffmpeg(self) -> tuple[bool, str | None]:
-        """Try imageio-ffmpeg first, fall back to legacy FFmpegChecker."""
-        try:
-            from ffmpeg_manager import get_ffmpeg_path, FFmpegNotFoundError
-            path = get_ffmpeg_path()
-            self.logger.info("FFmpeg resolved via imageio-ffmpeg: %s", path)
-            return True, path
-        except ImportError:
-            self.logger.warning("ffmpeg_manager not found; trying legacy checker.")
-        except Exception as exc:
-            self.logger.warning("ffmpeg_manager failed (%s); trying legacy checker.", exc)
+    def _check_ffmpeg(self) -> bool:
+        """
+        Verify FFmpeg is available.
 
-        try:
-            from utils.ffmpeg_checker import FFmpegChecker
-            ok = FFmpegChecker.check()
-            path = FFmpegChecker.get_path() if ok else None
-            if ok:
-                self.logger.info("FFmpeg resolved via legacy checker: %s", path)
+        Checks the user-saved path from settings first, then falls back to
+        system PATH. Updates _ffmpeg_location in settings if PATH is used so
+        yt-dlp can find it immediately without re-searching.
+        """
+        import os
+
+        saved_dir = self.settings.get("ffmpeg_bin_dir") or ""
+
+        # 1. Check user-saved directory
+        if saved_dir and os.path.isdir(saved_dir):
+            exe = os.path.join(saved_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            if os.path.isfile(exe):
+                self.settings.set("_ffmpeg_location", saved_dir)
+                self.logger.info("FFmpeg from saved path: %s", exe)
+                return True
             else:
-                self.logger.error(
-                    "FFmpeg not found. Install imageio-ffmpeg: pip install imageio-ffmpeg"
+                self.logger.warning(
+                    "Saved FFmpeg path '%s' does not contain ffmpeg binary.", saved_dir
                 )
-            return ok, path
-        except Exception as exc:
-            self.logger.error("FFmpegChecker raised: %s", exc)
-            return False, None
 
-    # ── JS runtime detection ──────────────────────────────────────────────────
+        # 2. System PATH
+        found = shutil.which("ffmpeg")
+        if found:
+            directory = os.path.dirname(os.path.abspath(found))
+            self.settings.set("_ffmpeg_location", directory)
+            self.logger.info("FFmpeg found on system PATH: %s", found)
+            return True
+
+        self.logger.error(
+            "FFmpeg not found. Set the FFmpeg bin folder in Settings > Tools."
+        )
+        self.settings.set("_ffmpeg_location", "")
+        return False
+
+    # ── JS runtime ────────────────────────────────────────────────────────────
 
     def _detect_js_runtime(self):
-        """
-        Detect a JS runtime and store results in settings for DownloadEngine.
-        Returns a JsRuntimeResult (or a stub SimpleNamespace if module missing).
-        """
+        """Detect a JS runtime, respecting any user override in settings."""
+        import os
+
+        # Check for a user-supplied override first
+        override = self.settings.get("js_runtime_override_path") or ""
+        if override and os.path.isfile(override):
+            from types import SimpleNamespace
+            name = _guess_runtime_name(override)
+            self.settings.set("_js_runtime_name", name)
+            self.settings.set("_js_runtime_path", override)
+            self.logger.info("JS runtime from user override: %s (%s)", override, name)
+            return SimpleNamespace(available=True, name=name, path=override, version="user")
+
+        # Auto-detect
         try:
             from js_runtime_manager import detect_js_runtime
             result = detect_js_runtime()
             self.settings.set("_js_runtime_name", result.name)
             self.settings.set("_js_runtime_path", result.path or "")
             return result
-        except ImportError:
-            self.logger.warning("js_runtime_manager not found; JS runtime detection skipped.")
         except Exception as exc:
             self.logger.error("JS runtime detection failed: %s", exc)
 
@@ -131,3 +144,11 @@ class YouTubeBatchDownloader(ctk.CTk):
     def _show_js_runtime_warning(self) -> None:
         from ui.dialogs import show_js_runtime_warning
         show_js_runtime_warning(self)
+
+
+def _guess_runtime_name(path: str) -> str:
+    base = __import__("os").path.basename(path).lower().replace(".exe", "")
+    for name in ("node", "qjs", "deno", "bun"):
+        if name in base:
+            return name
+    return "node"

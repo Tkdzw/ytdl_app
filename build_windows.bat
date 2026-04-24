@@ -1,12 +1,11 @@
 @echo off
 :: ─────────────────────────────────────────────────────────────────────────────
 :: build_windows.bat  —  One-click build for YT Batch Downloader on Windows
-:: Run this from the ytdl_app\ folder (where main.py lives):
-::   build_windows.bat
+:: Run from the ytdl_app\ folder:  build_windows.bat
 ::
-:: FFmpeg is bundled automatically via imageio-ffmpeg — no manual install needed.
+:: FFmpeg is NOT bundled. Users install it separately and set the path in
+:: Settings > Tools, or add it to their system PATH.
 :: ─────────────────────────────────────────────────────────────────────────────
-
 setlocal EnableDelayedExpansion
 
 echo.
@@ -23,7 +22,7 @@ if errorlevel 1 (
 )
 for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo [OK] %%v
 
-:: ── Check / activate venv ────────────────────────────────────────────────────
+:: ── Create / activate venv ───────────────────────────────────────────────────
 if exist "venv\Scripts\activate.bat" (
     echo [OK] Activating existing venv...
     call venv\Scripts\activate.bat
@@ -33,79 +32,46 @@ if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
-:: ── Install / upgrade dependencies ───────────────────────────────────────────
-echo [..] Installing dependencies (this includes the bundled FFmpeg binary)...
+:: ── Install dependencies ─────────────────────────────────────────────────────
+echo [..] Installing dependencies...
 pip install --upgrade pip --quiet
 pip install -r requirements.txt --quiet
 if errorlevel 1 (
-    echo [ERROR] pip install failed. Check requirements.txt.
+    echo [ERROR] pip install failed.
     pause & exit /b 1
 )
-echo [OK] All dependencies installed (FFmpeg bundled via imageio-ffmpeg).
-
-:: ── Install PyInstaller ───────────────────────────────────────────────────────
 pip install pyinstaller --quiet
-if errorlevel 1 (
-    echo [ERROR] Could not install PyInstaller.
-    pause & exit /b 1
-)
-echo [OK] PyInstaller ready.
+echo [OK] Dependencies installed.
 
-:: ── Check for Node.js (JS runtime for yt-dlp YouTube extraction) ────────────────
-echo [..] Checking for Node.js (required for YouTube downloads)...
+:: ── Check Node.js ────────────────────────────────────────────────────────────
 node --version >nul 2>&1
 if errorlevel 1 (
-    echo [WARN] Node.js not found on PATH.
-    echo        YouTube downloads may fail for some videos.
-    echo        Install Node.js: https://nodejs.org/  or  winget install OpenJS.NodeJS
-    echo        You can continue the build without it - it is only needed at runtime.
+    echo [WARN] Node.js not found — YouTube downloads may fail without it.
+    echo        Install: winget install OpenJS.NodeJS
 ) else (
     for /f "tokens=*" %%v in ('node --version 2^>^&1') do echo [OK] Node.js %%v
 )
 
-:: ── Verify imageio-ffmpeg can find its binary ─────────────────────────────────
-echo [..] Verifying bundled FFmpeg...
-python -c "import imageio_ffmpeg; p = imageio_ffmpeg.get_ffmpeg_exe(); print('[OK] Bundled FFmpeg:', p)"
-if errorlevel 1 (
-    echo [ERROR] imageio-ffmpeg could not locate its FFmpeg binary.
-    echo         Try: pip install --upgrade imageio-ffmpeg
-    pause & exit /b 1
-)
-
-:: ── Clean old build artifacts ─────────────────────────────────────────────────
-echo [..] Cleaning previous build artifacts...
+:: ── Clean previous build ─────────────────────────────────────────────────────
+echo [..] Cleaning previous build...
 if exist "dist\YTBatchDownloader" rmdir /s /q "dist\YTBatchDownloader"
 if exist "build\YTBatchDownloader" rmdir /s /q "build\YTBatchDownloader"
 
-:: ── Run PyInstaller ───────────────────────────────────────────────────────────
-echo [..] Running PyInstaller (imageio-ffmpeg binary will be bundled)...
+:: ── Run PyInstaller ──────────────────────────────────────────────────────────
+echo [..] Running PyInstaller...
 pyinstaller build.spec --clean --noconfirm
 if errorlevel 1 (
-    echo.
-    echo [ERROR] PyInstaller failed. Check the output above.
+    echo [ERROR] PyInstaller failed. See output above.
     pause & exit /b 1
 )
 
-:: ── Confirm FFmpeg is present in dist ────────────────────────────────────────
-echo [..] Verifying FFmpeg in build output...
-dir /s /b "dist\YTBatchDownloader\*.exe" 2>nul | findstr /i "ffmpeg" >nul
-if errorlevel 1 (
-    echo [WARN] ffmpeg.exe not found at top level — it may be inside imageio_ffmpeg\.
-    echo        This is normal; imageio_ffmpeg handles path resolution at runtime.
-) else (
-    echo [OK] ffmpeg.exe detected in dist output.
-)
-
-:: ── Result ────────────────────────────────────────────────────────────────────
 echo.
 echo  ╔════════════════════════════════════════════════════════════════╗
 echo  ║  Build complete!                                               ║
 echo  ║  Executable: dist\YTBatchDownloader\YTBatchDownloader.exe     ║
 echo  ║                                                                ║
-echo  ║  FFmpeg is bundled — end users do NOT need to install it.      ║
+echo  ║  NOTE: Users must install FFmpeg separately.                   ║
+echo  ║  Set the bin folder in the app: Settings ^> Tools              ║
 echo  ╚════════════════════════════════════════════════════════════════╝
-echo.
-echo  Distribute the entire dist\YTBatchDownloader\ folder,
-echo  or run installer.iss with Inno Setup to create a single .exe installer.
 echo.
 pause

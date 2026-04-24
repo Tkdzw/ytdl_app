@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -24,7 +25,7 @@ _USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Strips ANSI colour codes that yt-dlp embeds in error strings on Windows
+# Strips ANSI colour codes yt-dlp embeds in error strings on Windows
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFABCDJsu]|\[0;3[0-9]m|\033\[[^a-zA-Z]*[a-zA-Z]")
 
 
@@ -58,9 +59,9 @@ class DownloadRequest:
     subtitle_lang: str = "en"
     skip_existing: bool = True
     proxy_url: str = ""
-    ffmpeg_location: str = ""        # directory; may be "" — resolved live if so
-    js_runtime_name: str = ""        # "node" | "qjs" | "deno" | "bun" | ""
-    js_runtime_path: str = ""        # absolute path to the JS runtime binary
+    ffmpeg_location: str = ""        # directory containing ffmpeg binary
+    js_runtime_name: str = ""        # "node" | "qjs" | "deno" | "bun"
+    js_runtime_path: str = ""        # absolute path to JS runtime binary
 
 
 @dataclass
@@ -87,36 +88,30 @@ def _resolve_ffmpeg_location(stored_dir: str) -> str:
     Return the directory containing the ffmpeg binary.
 
     Resolution order:
-      1. stored_dir from settings (validated at startup or set by user)
-      2. Live call to ffmpeg_manager.get_ffmpeg_path()  (imageio-ffmpeg)
-      3. shutil.which("ffmpeg")                          (system PATH)
+      1. stored_dir from settings — the folder the user set in Settings > Tools.
+         This is persisted across restarts and is always tried first.
+      2. shutil.which("ffmpeg") — system PATH fallback for when the user
+         has ffmpeg on PATH but hasn't set it in Settings yet.
 
-    Returns "" if nothing is found; yt-dlp will then produce a clear error.
+    Returns "" if nothing is found so yt-dlp surfaces a clear error message.
     """
-    # 1. Trust stored value if the binary actually exists there
+    # 1. User-supplied / previously saved path
     if stored_dir and os.path.isdir(stored_dir):
         exe = os.path.join(stored_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
         if os.path.isfile(exe):
+            _log.debug("FFmpeg from saved location: %s", exe)
             return stored_dir
 
-    # 2. Live resolve via imageio-ffmpeg
-    try:
-        from ffmpeg_manager import get_ffmpeg_path
-        path = get_ffmpeg_path()
-        directory = os.path.dirname(path)
-        _log.info("FFmpeg resolved live via ffmpeg_manager: %s", path)
-        return directory
-    except Exception as exc:
-        _log.debug("ffmpeg_manager live resolve failed: %s", exc)
-
-    # 3. System PATH fallback
-    import shutil
+    # 2. System PATH fallback
     found = shutil.which("ffmpeg")
     if found:
         directory = os.path.dirname(os.path.abspath(found))
         _log.info("FFmpeg found on system PATH: %s", found)
         return directory
 
+    _log.warning(
+        "FFmpeg not found. Set the FFmpeg bin folder in Settings > Tools."
+    )
     return ""
 
 
@@ -183,25 +178,15 @@ class DownloadEngine:
         if req.proxy_url:
             base_opts["proxy"] = req.proxy_url
 
-        # ── FFmpeg location ───────────────────────────────────────────────────
-        # Resolve live on every download so user changes in Settings take effect
-        # immediately without restarting the app.
+        # ── FFmpeg ────────────────────────────────────────────────────────────
         ffmpeg_dir = _resolve_ffmpeg_location(req.ffmpeg_location)
         if ffmpeg_dir:
             base_opts["ffmpeg_location"] = ffmpeg_dir
-            _log.debug("ffmpeg_location for yt-dlp: %s", ffmpeg_dir)
-        else:
-            _log.warning(
-                "FFmpeg could not be located. "
-                "Set the FFmpeg bin folder in Settings > Tools."
-            )
+            _log.debug("ffmpeg_location: %s", ffmpeg_dir)
 
-        # ── JS runtime for YouTube extraction ─────────────────────────────────
+        # ── JS runtime ────────────────────────────────────────────────────────
         js_runtimes = _build_js_runtimes_param(req.js_runtime_name, req.js_runtime_path)
-        if js_runtimes:
-            base_opts["js_runtimes"] = js_runtimes
-        else:
-            base_opts["js_runtimes"] = {}
+        base_opts["js_runtimes"] = js_runtimes
 
         if on_log:
             base_opts["logger"] = _YtdlpLogger(on_log)
@@ -238,9 +223,7 @@ class DownloadEngine:
         subtitle_lang: str = "en",
     ) -> dict:
         merge_fmt = fmt if fmt in ("mp4", "mkv", "webm") else "mp4"
-        pps: list[dict] = [
-            {"key": "FFmpegVideoConvertor", "preferedformat": merge_fmt}
-        ]
+        pps: list[dict] = [{"key": "FFmpegVideoConvertor", "preferedformat": merge_fmt}]
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
         opts: dict = {
@@ -287,10 +270,8 @@ class DownloadEngine:
 # ── JS runtimes param builder ─────────────────────────────────────────────────
 
 def _build_js_runtimes_param(runtime_name: str, runtime_path: str) -> dict:
-    """Build the js_runtimes dict for YoutubeDL opts."""
     name = (runtime_name or "").strip()
     path = (runtime_path or "").strip()
-
     if not name or name == "none":
         return {}
     if path and os.path.isfile(path):

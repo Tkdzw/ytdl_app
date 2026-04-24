@@ -2,8 +2,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Install with: pip install -r requirements.txt
 #
-# FFmpeg is bundled automatically via imageio-ffmpeg — no manual install needed.
-# A JavaScript runtime (Node.js recommended) is needed for YouTube extraction.
+# FFmpeg must be installed separately and its bin folder set in
+# Settings > Tools, or added to your system PATH.
+# Download FFmpeg: https://ffmpeg.org/download.html
 # ─────────────────────────────────────────────────────────────────────────────
 
 # GUI framework
@@ -12,20 +13,16 @@ customtkinter>=5.2.0
 # YouTube / media downloader
 yt-dlp>=2025.1.0
 
-# YouTube JS challenge solver scripts (pure Python package — still needs a
-# runtime binary like node/qjs to execute, but ships the scripts themselves)
+# YouTube JS challenge solver scripts
 yt-dlp-ejs>=0.8.0
 
 # Image support (thumbnails)
 Pillow>=10.0.0
 
-# Self-contained FFmpeg (pre-built binary, no manual install needed)
-imageio-ffmpeg>=0.4.9
-
-# Audio metadata tagging (used by yt-dlp for MP3 metadata embedding)
+# Audio metadata tagging
 mutagen>=1.47.0
 
 # TLS certificate bundle
 certifi>=2024.2.2
 
-# pyinstaller>=6.0.0   # uncomment when building the distributable .exe
+# pyinstaller>=6.0.0   # uncomment when building the .exe

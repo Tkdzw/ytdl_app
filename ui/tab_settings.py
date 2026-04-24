@@ -469,14 +469,7 @@ class SettingsTab(ctk.CTkFrame):
 
     @staticmethod
     def _auto_detect_ffmpeg() -> str:
-        """Return the directory containing ffmpeg, or '' if not found."""
-        # Try imageio-ffmpeg first (bundled binary)
-        try:
-            from ffmpeg_manager import get_ffmpeg_path
-            return os.path.dirname(get_ffmpeg_path())
-        except Exception:
-            pass
-        # Fall back to PATH
+        """Return the directory containing ffmpeg from system PATH, or ''."""
         import shutil
         found = shutil.which("ffmpeg")
         return os.path.dirname(os.path.abspath(found)) if found else ""
@@ -534,14 +527,19 @@ class SettingsTab(ctk.CTkFrame):
     # ── Status badge helpers ──────────────────────────────────────────────────
 
     def _get_ffmpeg_status_text(self) -> str:
+        # Check user-saved directory first
+        saved = self._settings.get("ffmpeg_bin_dir") or ""
+        if saved and os.path.isdir(saved):
+            exe = os.path.join(saved, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            if os.path.isfile(exe):
+                return f"✓ Saved: {saved}"
+        # Fall back to _ffmpeg_location written at startup
         loc = self._settings.get("_ffmpeg_location") or ""
         if loc and os.path.isdir(loc):
             exe = os.path.join(loc, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
             if os.path.isfile(exe):
-                return f"✓ Active: {loc}"
-        # Try live detection
-        d = self._auto_detect_ffmpeg()
-        return f"✓ Auto: {d}" if d else "⚠ Not found"
+                return f"✓ PATH: {loc}"
+        return "⚠ Not found — set path below"
 
     def _get_ffmpeg_status_color(self) -> str:
         return "#4CAF50" if "✓" in self._get_ffmpeg_status_text() else "#FF6B6B"
