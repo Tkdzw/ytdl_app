@@ -1,6 +1,5 @@
 """
 Utility: Persistent settings manager backed by JSON.
-Stores user preferences like output directory, concurrency, theme, etc.
 """
 from __future__ import annotations
 
@@ -14,7 +13,6 @@ from utils.logger import AppLogger
 _SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".ytdl_app", "settings.json")
 _log = AppLogger.get_logger(__name__)
 
-# ── Default settings ──────────────────────────────────────────────────────────
 DEFAULTS: dict[str, Any] = {
     "output_dir": os.path.join(os.path.expanduser("~"), "Downloads", "YTBatchDL"),
     "default_video_format": "mp4",
@@ -27,11 +25,17 @@ DEFAULTS: dict[str, Any] = {
     "embed_thumbnail": False,
     "write_subtitles": False,
     "subtitle_lang": "en",
-    "rate_limit_kb": 0,          # 0 = unlimited
-    "concurrent_fragments": 4,   # yt-dlp fragment threads
+    "rate_limit_kb": 0,
+    "concurrent_fragments": 4,
     "skip_existing": True,
     "proxy_url": "",
-    "_ffmpeg_location": "",   # auto-detected at startup, not shown in UI
+    # ── User-configurable tool paths (shown in Settings > Tools) ──────────────
+    "ffmpeg_bin_dir": "",           # user-supplied FFmpeg folder (blank = auto)
+    "js_runtime_override_path": "", # user-supplied JS runtime binary (blank = auto)
+    # ── Auto-detected at startup (not shown directly in UI) ───────────────────
+    "_ffmpeg_location": "",         # resolved FFmpeg directory used by yt-dlp
+    "_js_runtime_name": "",         # "node" | "qjs" | "deno" | "bun" | ""
+    "_js_runtime_path": "",         # absolute path to JS runtime binary
 }
 
 
@@ -45,8 +49,6 @@ class SettingsManager:
         self._data: dict[str, Any] = {}
         self._load()
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
     def get(self, key: str) -> Any:
         with self._lock:
             return self._data.get(key, DEFAULTS.get(key))
@@ -57,7 +59,6 @@ class SettingsManager:
             self._save()
 
     def update(self, values: dict[str, Any]) -> None:
-        """Bulk update and save once."""
         with self._lock:
             self._data.update(values)
             self._save()
@@ -72,13 +73,10 @@ class SettingsManager:
         with self._lock:
             return dict(self._data)
 
-    # ── Internal ──────────────────────────────────────────────────────────────
-
     def _load(self) -> None:
         try:
             with open(self._path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
-            # Merge with defaults so new keys always exist
             self._data = {**DEFAULTS, **stored}
             _log.debug("Settings loaded from %s", self._path)
         except (FileNotFoundError, json.JSONDecodeError):

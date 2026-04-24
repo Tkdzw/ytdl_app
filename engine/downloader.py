@@ -2,7 +2,10 @@
 Engine: yt-dlp download wrapper.
 Runs inside a background thread; communicates back via callbacks.
 """
+from __future__ import annotations
+
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -21,12 +24,19 @@ _USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Strips ANSI colour codes that yt-dlp embeds in error strings on Windows
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFABCDJsu]|\[0;3[0-9]m|\033\[[^a-zA-Z]*[a-zA-Z]")
 
-# ── Data types ───────────────────────────────────────────────────────────────
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text).strip()
+
+
+# ── Data types ────────────────────────────────────────────────────────────────
 
 @dataclass
 class ProgressData:
-    status: str = ""          # "downloading" | "finished" | "error"
+    status: str = ""
     percent: float = 0.0
     speed: str = ""
     eta: str = ""
@@ -37,18 +47,20 @@ class ProgressData:
 class DownloadRequest:
     url: str
     mode: str                        # "video" | "audio"
-    video_format: str = "mp4"        # mp4 / mkv / webm  (video mode only)
+    video_format: str = "mp4"
     output_dir: str = field(default_factory=lambda: _DEFAULT_OUTPUT_DIR)
-    audio_quality: str = "192"       # kbps for MP3
+    audio_quality: str = "192"
     max_retries: int = 2
-    rate_limit_kb: int = 0           # 0 = unlimited
+    rate_limit_kb: int = 0
     concurrent_fragments: int = 4
     embed_thumbnail: bool = False
     write_subtitles: bool = False
     subtitle_lang: str = "en"
     skip_existing: bool = True
     proxy_url: str = ""
-    ffmpeg_location: str = ""  # explicit path dir for yt-dlp ffmpeg_location
+    ffmpeg_location: str = ""        # directory; may be "" — resolved live if so
+    js_runtime_name: str = ""        # "node" | "qjs" | "deno" | "bun" | ""
+    js_runtime_path: str = ""        # absolute path to the JS runtime binary
 
 
 @dataclass
@@ -60,20 +72,58 @@ class DownloadResult:
     error_message: str = ""
 
 
-# ── Callbacks type aliases ───────────────────────────────────────────────────
+# ── Callback aliases ──────────────────────────────────────────────────────────
 
 ProgressCallback = Callable[[ProgressData], None]
 DoneCallback = Callable[[DownloadResult], None]
 LogCallback = Callable[[str], None]
+ItemStartCallback = Callable[[str, int, int], None]
 
 
-# ── Engine ───────────────────────────────────────────────────────────────────
+# ── FFmpeg location resolver ──────────────────────────────────────────────────
+
+def _resolve_ffmpeg_location(stored_dir: str) -> str:
+    """
+    Return the directory containing the ffmpeg binary.
+
+    Resolution order:
+      1. stored_dir from settings (validated at startup or set by user)
+      2. Live call to ffmpeg_manager.get_ffmpeg_path()  (imageio-ffmpeg)
+      3. shutil.which("ffmpeg")                          (system PATH)
+
+    Returns "" if nothing is found; yt-dlp will then produce a clear error.
+    """
+    # 1. Trust stored value if the binary actually exists there
+    if stored_dir and os.path.isdir(stored_dir):
+        exe = os.path.join(stored_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if os.path.isfile(exe):
+            return stored_dir
+
+    # 2. Live resolve via imageio-ffmpeg
+    try:
+        from ffmpeg_manager import get_ffmpeg_path
+        path = get_ffmpeg_path()
+        directory = os.path.dirname(path)
+        _log.info("FFmpeg resolved live via ffmpeg_manager: %s", path)
+        return directory
+    except Exception as exc:
+        _log.debug("ffmpeg_manager live resolve failed: %s", exc)
+
+    # 3. System PATH fallback
+    import shutil
+    found = shutil.which("ffmpeg")
+    if found:
+        directory = os.path.dirname(os.path.abspath(found))
+        _log.info("FFmpeg found on system PATH: %s", found)
+        return directory
+
+    return ""
+
+
+# ── Engine ────────────────────────────────────────────────────────────────────
 
 class DownloadEngine:
-    """
-    Wraps yt-dlp to download a single URL.
-    Always runs in the calling thread; use DownloadWorker for background use.
-    """
+    """Wraps yt-dlp to download a single URL synchronously."""
 
     def download(
         self,
@@ -81,12 +131,7 @@ class DownloadEngine:
         on_progress: Optional[ProgressCallback] = None,
         on_log: Optional[LogCallback] = None,
     ) -> DownloadResult:
-        """
-        Execute the download synchronously.
-        Returns a DownloadResult regardless of success/failure.
-        """
         os.makedirs(request.output_dir, exist_ok=True)
-
         ydl_opts = self._build_opts(request, on_progress, on_log)
         title = request.url
         filepath = ""
@@ -97,34 +142,18 @@ class DownloadEngine:
                 if info:
                     title = info.get("title", request.url)
                     filepath = ydl.prepare_filename(info)
-            return DownloadResult(
-                url=request.url,
-                title=title,
-                filepath=filepath,
-                success=True,
-            )
+            return DownloadResult(url=request.url, title=title,
+                                  filepath=filepath, success=True)
         except yt_dlp.utils.DownloadError as exc:
-            msg = str(exc)
+            msg = _strip_ansi(str(exc))
             _log.error("DownloadError for %s: %s", request.url, msg)
-            return DownloadResult(
-                url=request.url,
-                title=title,
-                filepath="",
-                success=False,
-                error_message=msg,
-            )
+            return DownloadResult(url=request.url, title=title,
+                                  filepath="", success=False, error_message=msg)
         except Exception as exc:
-            msg = f"Unexpected error: {exc}"
+            msg = _strip_ansi(f"Unexpected error: {exc}")
             _log.exception("Unexpected error for %s", request.url)
-            return DownloadResult(
-                url=request.url,
-                title=title,
-                filepath="",
-                success=False,
-                error_message=msg,
-            )
-
-    # ── Private helpers ───────────────────────────────────────────────────────
+            return DownloadResult(url=request.url, title=title,
+                                  filepath="", success=False, error_message=msg)
 
     def _build_opts(
         self,
@@ -154,9 +183,25 @@ class DownloadEngine:
         if req.proxy_url:
             base_opts["proxy"] = req.proxy_url
 
-        # Point yt-dlp directly at ffmpeg (handles non-PATH WinGet/Scoop installs)
-        if req.ffmpeg_location:
-            base_opts["ffmpeg_location"] = req.ffmpeg_location
+        # ── FFmpeg location ───────────────────────────────────────────────────
+        # Resolve live on every download so user changes in Settings take effect
+        # immediately without restarting the app.
+        ffmpeg_dir = _resolve_ffmpeg_location(req.ffmpeg_location)
+        if ffmpeg_dir:
+            base_opts["ffmpeg_location"] = ffmpeg_dir
+            _log.debug("ffmpeg_location for yt-dlp: %s", ffmpeg_dir)
+        else:
+            _log.warning(
+                "FFmpeg could not be located. "
+                "Set the FFmpeg bin folder in Settings > Tools."
+            )
+
+        # ── JS runtime for YouTube extraction ─────────────────────────────────
+        js_runtimes = _build_js_runtimes_param(req.js_runtime_name, req.js_runtime_path)
+        if js_runtimes:
+            base_opts["js_runtimes"] = js_runtimes
+        else:
+            base_opts["js_runtimes"] = {}
 
         if on_log:
             base_opts["logger"] = _YtdlpLogger(on_log)
@@ -165,10 +210,8 @@ class DownloadEngine:
             base_opts.update(self._audio_opts(req.audio_quality, req.embed_thumbnail))
         else:
             base_opts.update(self._video_opts(
-                req.video_format,
-                req.embed_thumbnail,
-                req.write_subtitles,
-                req.subtitle_lang,
+                req.video_format, req.embed_thumbnail,
+                req.write_subtitles, req.subtitle_lang,
             ))
 
         return base_opts
@@ -176,11 +219,8 @@ class DownloadEngine:
     @staticmethod
     def _audio_opts(quality: str = "192", embed_thumbnail: bool = False) -> dict:
         pps: list[dict] = [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": quality,
-            }
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3",
+             "preferredquality": quality}
         ]
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
@@ -199,28 +239,22 @@ class DownloadEngine:
     ) -> dict:
         merge_fmt = fmt if fmt in ("mp4", "mkv", "webm") else "mp4"
         pps: list[dict] = [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": merge_fmt,
-            }
+            {"key": "FFmpegVideoConvertor", "preferedformat": merge_fmt}
         ]
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
-
         opts: dict = {
             "format": "bestvideo+bestaudio/best",
             "merge_output_format": merge_fmt,
             "postprocessors": pps,
             "writethumbnail": embed_thumbnail,
         }
-
         if write_subtitles:
             opts.update({
                 "writesubtitles": True,
                 "writeautomaticsub": True,
                 "subtitleslangs": [subtitle_lang],
             })
-
         return opts
 
     @staticmethod
@@ -235,49 +269,41 @@ class DownloadEngine:
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
                 downloaded = d.get("downloaded_bytes", 0)
                 percent = min((downloaded / total) * 100, 100.0)
-                speed_raw = d.get("speed") or 0
-                speed = _fmt_speed(speed_raw)
-                eta_raw = d.get("eta")
-                eta = _fmt_eta(eta_raw)
-                on_progress(
-                    ProgressData(
-                        status="downloading",
-                        percent=percent,
-                        speed=speed,
-                        eta=eta,
-                        filename=d.get("filename", ""),
-                    )
-                )
+                on_progress(ProgressData(
+                    status="downloading",
+                    percent=percent,
+                    speed=_fmt_speed(d.get("speed") or 0),
+                    eta=_fmt_eta(d.get("eta")),
+                    filename=d.get("filename", ""),
+                ))
             elif status == "finished":
-                on_progress(
-                    ProgressData(
-                        status="finished",
-                        percent=100.0,
-                        filename=d.get("filename", ""),
-                    )
-                )
+                on_progress(ProgressData(
+                    status="finished", percent=100.0,
+                    filename=d.get("filename", ""),
+                ))
         return hook
 
 
-# ── Callback type for item-start notification ────────────────────────────────
-ItemStartCallback = Callable[[str, int, int], None]   # url, index, total
+# ── JS runtimes param builder ─────────────────────────────────────────────────
+
+def _build_js_runtimes_param(runtime_name: str, runtime_path: str) -> dict:
+    """Build the js_runtimes dict for YoutubeDL opts."""
+    name = (runtime_name or "").strip()
+    path = (runtime_path or "").strip()
+
+    if not name or name == "none":
+        return {}
+    if path and os.path.isfile(path):
+        return {name: {"path": path}}
+    if name in ("node", "qjs", "deno", "bun"):
+        return {name: {}}
+    return {}
 
 
-# ── Worker: runs DownloadEngine in a background thread ───────────────────────
+# ── Worker ────────────────────────────────────────────────────────────────────
 
 class DownloadWorker(threading.Thread):
-    """
-    Processes a list of DownloadRequests sequentially in a daemon thread.
-    Callbacks are delivered from the worker thread; callers must dispatch
-    UI updates via widget.after().
-
-    Callback signatures:
-        on_progress(ProgressData)
-        on_item_start(url: str, index: int, total: int)
-        on_item_done(DownloadResult)
-        on_log(str)
-        on_all_done()
-    """
+    """Processes DownloadRequests sequentially in a daemon thread."""
 
     def __init__(
         self,
@@ -299,7 +325,6 @@ class DownloadWorker(threading.Thread):
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
-        """Request graceful cancellation after the current download finishes."""
         self._stop_event.set()
 
     @property
@@ -308,26 +333,21 @@ class DownloadWorker(threading.Thread):
 
     def run(self) -> None:
         total = len(self._requests)
-        completed = 0
-        failed = 0
+        completed = failed = 0
 
         for index, req in enumerate(self._requests, start=1):
             if self._stop_event.is_set():
-                _log.info("Download worker cancelled after %d/%d items.", index - 1, total)
                 if self._on_log:
                     self._on_log(f"⏹ Cancelled — {index-1}/{total} processed.")
                 break
 
-            # Notify UI that this item is starting
             if self._on_item_start:
                 self._on_item_start(req.url, index, total)
 
             _log.info("[%d/%d] Starting: %s [%s]", index, total, req.url, req.mode)
 
             result = self._engine.download(
-                req,
-                on_progress=self._on_progress,
-                on_log=self._on_log,
+                req, on_progress=self._on_progress, on_log=self._on_log
             )
 
             if result.success:
@@ -347,11 +367,9 @@ class DownloadWorker(threading.Thread):
             self._on_all_done()
 
 
-# ── yt-dlp logger adapter ────────────────────────────────────────────────────
+# ── yt-dlp logger adapter ─────────────────────────────────────────────────────
 
 class _YtdlpLogger:
-    """Redirects yt-dlp internal messages to the UI log callback."""
-
     def __init__(self, callback: LogCallback) -> None:
         self._cb = callback
 
@@ -367,7 +385,7 @@ class _YtdlpLogger:
         self._cb(f"[warn] {msg}")
 
     def error(self, msg: str) -> None:
-        self._cb(f"[error] {msg}")
+        self._cb(f"[error] {_strip_ansi(msg)}")
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────────

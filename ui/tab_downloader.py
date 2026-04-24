@@ -1,11 +1,5 @@
 """
-UI Tab: Downloader — URL input, mode selector, progress display (UPDATED).
-─────────────────────────────────────────────────────────────────────────────
-Changes from original:
-  • "Convert after download" panel wired to ConversionWorker.
-  • Format/bitrate selectors added for post-download conversion.
-  • Conversion progress fed into the same progress bar and log widget.
-  • FFmpeg path is sourced from ffmpeg_manager (no user install required).
+UI Tab: Downloader — URL input, mode selector, progress display.
 """
 from __future__ import annotations
 
@@ -39,6 +33,7 @@ class DownloaderTab(ctk.CTkFrame):
         history_manager: HistoryManager,
         settings: SettingsManager,
         ffmpeg_ok: bool,
+        js_runtime=None,
         on_queue_update: Optional[Callable] = None,
         **kwargs,
     ) -> None:
@@ -46,12 +41,11 @@ class DownloaderTab(ctk.CTkFrame):
         self._history = history_manager
         self._settings = settings
         self._ffmpeg_ok = ffmpeg_ok
+        self._js_runtime = js_runtime
         self._on_queue_update = on_queue_update
         self._worker: Optional[DownloadWorker] = None
         self._is_downloading = False
         self._queue_items: list[dict] = []
-
-        # Conversion state
         self._conv_worker = None
         self._is_converting = False
 
@@ -70,15 +64,36 @@ class DownloaderTab(ctk.CTkFrame):
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(side="left")
 
+        # Status chips (FFmpeg + JS runtime)
+        chips = ctk.CTkFrame(header, fg_color="transparent")
+        chips.pack(side="right")
+
         if not self._ffmpeg_ok:
             ctk.CTkLabel(
-                header,
-                text="⚠ FFmpeg missing — downloads disabled",
+                chips,
+                text="⚠ FFmpeg missing",
                 text_color="#FF6B6B",
                 font=ctk.CTkFont(size=12),
-            ).pack(side="right", padx=8)
+            ).pack(side="right", padx=(8, 0))
 
-        # ── Split: URL input left, thumbnail right ────────────────────────────
+        js_ok = self._js_runtime and self._js_runtime.available
+        if js_ok:
+            rt = self._js_runtime
+            ctk.CTkLabel(
+                chips,
+                text=f"✓ {rt.name} v{rt.version}",
+                text_color="#4CAF50",
+                font=ctk.CTkFont(size=11),
+            ).pack(side="right", padx=(0, 12))
+        else:
+            ctk.CTkLabel(
+                chips,
+                text="⚠ No JS runtime — some videos may fail",
+                text_color="#DCDCAA",
+                font=ctk.CTkFont(size=11),
+            ).pack(side="right", padx=(0, 12))
+
+        # ── URL input + thumbnail ─────────────────────────────────────────────
         main_row = ctk.CTkFrame(self, fg_color="transparent")
         main_row.pack(fill="x", padx=24, pady=(0, 8))
 
@@ -96,22 +111,19 @@ class DownloaderTab(ctk.CTkFrame):
         self._url_box.pack(fill="x")
         self._url_box.bind("<FocusOut>", lambda _: self._validate_urls_live())
 
-        # Validation label
         self._validation_label = ctk.CTkLabel(
             left, text="", font=ctk.CTkFont(size=11), anchor="w", text_color="gray"
         )
         self._validation_label.pack(fill="x", pady=(2, 0))
 
-        # Thumbnail panel (right side)
-        thumb_panel = ctk.CTkFrame(main_row, width=180, fg_color=("gray90", "#1E1E1E"), corner_radius=8)
+        thumb_panel = ctk.CTkFrame(
+            main_row, width=180, fg_color=("gray90", "#1E1E1E"), corner_radius=8
+        )
         thumb_panel.pack(side="right", fill="y", padx=(12, 0))
         thumb_panel.pack_propagate(False)
-
         self._thumb_label = ctk.CTkLabel(
-            thumb_panel,
-            text="Thumbnail\npreview",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
+            thumb_panel, text="Thumbnail\npreview",
+            font=ctk.CTkFont(size=11), text_color="gray",
         )
         self._thumb_label.pack(expand=True)
 
@@ -120,31 +132,23 @@ class DownloaderTab(ctk.CTkFrame):
         controls.pack(fill="x", padx=24, pady=(8, 8))
 
         ctk.CTkLabel(controls, text="Mode:", font=ctk.CTkFont(size=13)).pack(side="left")
-
-        default_mode = self._settings.get("default_mode")
-        self._mode_var = ctk.StringVar(value=default_mode)
+        self._mode_var = ctk.StringVar(value=self._settings.get("default_mode"))
         ctk.CTkSegmentedButton(
-            controls,
-            values=["Video", "Audio (MP3)"],
-            variable=self._mode_var,
-            width=200,
+            controls, values=["Video", "Audio (MP3)"],
+            variable=self._mode_var, width=200,
         ).pack(side="left", padx=(8, 24))
 
         ctk.CTkLabel(controls, text="Output folder:", font=ctk.CTkFont(size=13)).pack(side="left")
-
         self._outdir_var = ctk.StringVar(value=self._settings.get("output_dir"))
         ctk.CTkEntry(
-            controls,
-            textvariable=self._outdir_var,
-            width=260,
-            font=ctk.CTkFont(size=11),
+            controls, textvariable=self._outdir_var,
+            width=260, font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(8, 8))
-
         ctk.CTkButton(
             controls, text="Browse", width=70, command=self._browse_folder
         ).pack(side="left")
 
-        # ── NEW: Post-download conversion panel ───────────────────────────────
+        # ── Post-download conversion panel ────────────────────────────────────
         self._build_conversion_panel()
 
         # ── Action buttons ────────────────────────────────────────────────────
@@ -154,39 +158,30 @@ class DownloaderTab(ctk.CTkFrame):
         self._download_btn = ctk.CTkButton(
             btn_row,
             text="▶  Start Download",
-            width=180,
-            height=40,
+            width=180, height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#1A7F3C",
-            hover_color="#145C2C",
+            fg_color="#1A7F3C", hover_color="#145C2C",
             command=self._start_download,
             state="normal" if self._ffmpeg_ok else "disabled",
         )
         self._download_btn.pack(side="left", padx=(0, 12))
 
         self._cancel_btn = ctk.CTkButton(
-            btn_row,
-            text="⏹  Cancel",
-            width=120,
-            height=40,
+            btn_row, text="⏹  Cancel",
+            width=120, height=40,
             font=ctk.CTkFont(size=13),
-            fg_color="#7F1A1A",
-            hover_color="#5C1414",
+            fg_color="#7F1A1A", hover_color="#5C1414",
             command=self._cancel_download,
             state="disabled",
         )
         self._cancel_btn.pack(side="left", padx=(0, 16))
 
-        # Current item label
         self._current_item_label = ctk.CTkLabel(
-            btn_row,
-            text="",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
+            btn_row, text="", font=ctk.CTkFont(size=11), text_color="gray",
         )
         self._current_item_label.pack(side="left")
 
-        # ── Progress section ──────────────────────────────────────────────────
+        # ── Progress ──────────────────────────────────────────────────────────
         prog_frame = ctk.CTkFrame(self)
         prog_frame.pack(fill="x", padx=24, pady=(0, 8))
 
@@ -221,7 +216,7 @@ class DownloaderTab(ctk.CTkFrame):
         self._progress_bar.pack(fill="x", padx=16, pady=(0, 12))
         self._progress_bar.set(0)
 
-        # ── Log window ────────────────────────────────────────────────────────
+        # ── Log ───────────────────────────────────────────────────────────────
         log_header = ctk.CTkFrame(self, fg_color="transparent")
         log_header.pack(fill="x", padx=24)
         ctk.CTkLabel(
@@ -236,15 +231,14 @@ class DownloaderTab(ctk.CTkFrame):
         ).pack(side="right")
 
         self._log_box = ctk.CTkTextbox(
-            self,
-            font=ctk.CTkFont(family="Courier", size=11),
-            state="disabled",
+            self, font=ctk.CTkFont(family="Courier", size=11), state="disabled",
         )
         self._log_box.pack(fill="both", expand=True, padx=24, pady=(4, 20))
 
     def _build_conversion_panel(self) -> None:
-        """Build the optional post-download conversion sub-panel."""
-        conv_frame = ctk.CTkFrame(self, fg_color=("gray92", "#1A1A2E"), corner_radius=8)
+        conv_frame = ctk.CTkFrame(
+            self, fg_color=("gray92", "#1A1A2E"), corner_radius=8
+        )
         conv_frame.pack(fill="x", padx=24, pady=(0, 8))
 
         header_row = ctk.CTkFrame(conv_frame, fg_color="transparent")
@@ -256,48 +250,33 @@ class DownloaderTab(ctk.CTkFrame):
             font=ctk.CTkFont(size=12, weight="bold"),
         ).pack(side="left")
 
-        # Enable / disable toggle
         self._conv_enabled_var = ctk.BooleanVar(value=False)
         ctk.CTkSwitch(
-            header_row,
-            text="Enable",
+            header_row, text="Enable",
             variable=self._conv_enabled_var,
-            onvalue=True,
-            offvalue=False,
-            width=80,
+            onvalue=True, offvalue=False, width=80,
             command=self._on_conv_toggle,
         ).pack(side="right")
 
-        # Options row (hidden when disabled)
         self._conv_options_frame = ctk.CTkFrame(conv_frame, fg_color="transparent")
         self._conv_options_frame.pack(fill="x", padx=16, pady=(0, 10))
 
-        ctk.CTkLabel(
-            self._conv_options_frame,
-            text="Format:",
-            font=ctk.CTkFont(size=12),
-        ).pack(side="left")
-
+        ctk.CTkLabel(self._conv_options_frame, text="Format:",
+                     font=ctk.CTkFont(size=12)).pack(side="left")
         self._conv_format_var = ctk.StringVar(value="mp3")
         ctk.CTkSegmentedButton(
             self._conv_options_frame,
             values=["mp3", "wav", "mp4", "m4a"],
-            variable=self._conv_format_var,
-            width=220,
+            variable=self._conv_format_var, width=220,
         ).pack(side="left", padx=(8, 24))
 
-        ctk.CTkLabel(
-            self._conv_options_frame,
-            text="Bitrate:",
-            font=ctk.CTkFont(size=12),
-        ).pack(side="left")
-
+        ctk.CTkLabel(self._conv_options_frame, text="Bitrate:",
+                     font=ctk.CTkFont(size=12)).pack(side="left")
         self._conv_bitrate_var = ctk.StringVar(value="192k")
         ctk.CTkSegmentedButton(
             self._conv_options_frame,
             values=["128k", "192k", "256k", "320k"],
-            variable=self._conv_bitrate_var,
-            width=220,
+            variable=self._conv_bitrate_var, width=220,
         ).pack(side="left", padx=(8, 24))
 
         self._del_source_var = ctk.BooleanVar(value=False)
@@ -308,10 +287,9 @@ class DownloaderTab(ctk.CTkFrame):
             font=ctk.CTkFont(size=11),
         ).pack(side="left")
 
-        # Start hidden
         self._conv_options_frame.pack_forget()
 
-    # ── Conversion panel toggle ────────────────────────────────────────────────
+    # ── Conversion toggle ─────────────────────────────────────────────────────
 
     def _on_conv_toggle(self) -> None:
         if self._conv_enabled_var.get():
@@ -412,9 +390,20 @@ class DownloaderTab(ctk.CTkFrame):
             self._on_queue_update(self._queue_items)
 
         self._set_downloading(True)
-        self._log_ui(f"▶ Starting {len(requests)} download(s)…")
 
-        # Store output dir and conversion settings for the post-download step
+        # Log runtime status so user can see what's being used
+        js_ok = self._js_runtime and self._js_runtime.available
+        if js_ok:
+            self._log_ui(
+                f"▶ Starting {len(requests)} download(s)…  "
+                f"[JS: {self._js_runtime.name} v{self._js_runtime.version}]"
+            )
+        else:
+            self._log_ui(
+                f"▶ Starting {len(requests)} download(s)…  "
+                f"[⚠ No JS runtime — install Node.js if downloads fail]"
+            )
+
         self._pending_output_dir = output_dir
         self._pending_requests = requests
 
@@ -444,6 +433,9 @@ class DownloaderTab(ctk.CTkFrame):
             skip_existing=bool(self._settings.get("skip_existing")),
             proxy_url=self._settings.get("proxy_url"),
             ffmpeg_location=self._settings.get("_ffmpeg_location") or "",
+            # JS runtime — critical for YouTube extraction
+            js_runtime_name=self._settings.get("_js_runtime_name") or "",
+            js_runtime_path=self._settings.get("_js_runtime_path") or "",
         )
 
     def _cancel_download(self) -> None:
@@ -466,10 +458,6 @@ class DownloaderTab(ctk.CTkFrame):
     # ── Post-download conversion ──────────────────────────────────────────────
 
     def _start_conversion_batch(self, completed_results: list[DownloadResult]) -> None:
-        """
-        If conversion is enabled, start a ConversionWorker for all
-        successfully downloaded files.
-        """
         if not self._conv_enabled_var.get():
             return
 
@@ -504,7 +492,7 @@ class DownloaderTab(ctk.CTkFrame):
             )
 
         self._log_ui(
-            f"🔄 Starting conversion of {len(conv_requests)} file(s) "
+            f"🔄 Converting {len(conv_requests)} file(s) "
             f"to {output_format.upper()} @ {bitrate}…"
         )
         self._status_label.configure(text="Converting…", text_color="#DCDCAA")
@@ -548,8 +536,7 @@ class DownloaderTab(ctk.CTkFrame):
     # ── UI updates (main thread) ──────────────────────────────────────────────
 
     def _apply_progress(self, data: ProgressData) -> None:
-        pct = data.percent / 100.0
-        self._progress_bar.set(pct)
+        self._progress_bar.set(data.percent / 100.0)
         self._pct_label.configure(text=f"{data.percent:.0f}%")
         self._speed_label.configure(text=f"Speed: {data.speed}")
         self._eta_label.configure(text=f"ETA: {data.eta}")
@@ -608,33 +595,21 @@ class DownloaderTab(ctk.CTkFrame):
             self._log_ui(f"❌ Conversion failed: {name}\n   {result.error_message}")
 
     def _apply_all_done(self) -> None:
-        """Called when the download batch completes. May kick off conversion."""
-        completed_results = []
-        # Collect results from queue items that are now completed
-        # The items were stored in _apply_item_done; collect what we have
         self._set_downloading(False)
         self._log_ui("🏁 All downloads finished.")
         self._status_label.configure(text="Done", text_color="#4CAF50")
         self._current_item_label.configure(text="")
 
-        # Trigger conversion if enabled
         if self._conv_enabled_var.get():
-            # We need to collect the successfully downloaded filepaths.
-            # Re-derive from the queue items using the output directory.
             self._trigger_conversion_if_needed()
 
     def _trigger_conversion_if_needed(self) -> None:
-        """Start post-download conversion for queued completed items."""
         import os
         from engine.downloader import DownloadResult
 
-        # Build pseudo-results from queue items that succeeded
         pseudo_results = []
-        output_dir = getattr(self, "_pending_output_dir", _DEFAULT_OUTPUT_DIR)
         for item in self._queue_items:
             if item["status"] == "Completed":
-                # We don't have the exact filepath; use the stored result
-                # from history (last entry for this URL)
                 entry = self._history.get_latest_entry(item["url"])
                 if entry and entry.get("filepath"):
                     pseudo_results.append(
@@ -674,7 +649,6 @@ class DownloaderTab(ctk.CTkFrame):
         _log.info(msg)
 
     def on_settings_changed(self, key: str, value) -> None:
-        """Called by MainWindow when user changes a setting."""
         if key == "output_dir":
             self._outdir_var.set(str(value))
         elif key == "default_mode":

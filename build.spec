@@ -53,6 +53,15 @@ if _HAS_IMAGEIO_FFMPEG and IIO_FFMPEG_DIR is not None:
     # This includes the "binaries/" sub-folder which holds the static FFmpeg exe.
     _datas.append((str(IIO_FFMPEG_DIR), "imageio_ffmpeg"))
 
+# Bundle yt_dlp_ejs so its JS solver scripts are available in frozen builds.
+try:
+    import yt_dlp_ejs as _yt_dlp_ejs
+    _YT_DLP_EJS_DIR = Path(_yt_dlp_ejs.__file__).parent
+    _datas.append((str(_YT_DLP_EJS_DIR), "yt_dlp_ejs"))
+    print(f"[build.spec] yt_dlp_ejs bundled from: {_YT_DLP_EJS_DIR}")
+except ImportError:
+    print("WARNING: yt_dlp_ejs not installed. Fix: pip install yt-dlp-ejs")
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 a = Analysis(
@@ -65,9 +74,14 @@ a = Analysis(
         "imageio_ffmpeg",
         "imageio_ffmpeg._utils",
         "imageio_ffmpeg._definitions",
-        # ── ffmpeg_manager + conversion_worker ────────────────────────────────
+        # ── ffmpeg_manager + conversion_worker + js_runtime_manager ─────────────
         "ffmpeg_manager",
         "conversion_worker",
+        "js_runtime_manager",
+        # ── yt-dlp-ejs: JS challenge solver scripts (PyPI package) ────────────
+        "yt_dlp_ejs",
+        "yt_dlp_ejs.yt",
+        "yt_dlp_ejs.yt.solver",
         # ── CustomTkinter / Tk ────────────────────────────────────────────────
         "customtkinter",
         "tkinter",

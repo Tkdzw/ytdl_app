@@ -1,8 +1,10 @@
 """
 YouTube Batch Downloader – Application Root
 ─────────────────────────────────────────────────────────────────────────────
-FFmpeg is provided automatically via imageio-ffmpeg (zero user setup).
-Falls back to system PATH / legacy FFmpegChecker if imageio-ffmpeg is absent.
+Startup sequence:
+  1. Resolve FFmpeg  via imageio-ffmpeg (zero install)
+  2. Detect JS runtime (node/qjs/deno/bun) for yt-dlp's YouTube extractor
+  3. Store both in SettingsManager so DownloadEngine picks them up
 """
 import customtkinter as ctk
 
@@ -27,14 +29,15 @@ class YouTubeBatchDownloader(ctk.CTk):
         self.settings = SettingsManager()
         self.history  = HistoryManager()
 
-        # ── Resolve FFmpeg (imageio-ffmpeg first, legacy checker as fallback) ─
+        # ── Resolve FFmpeg ────────────────────────────────────────────────────
         self.ffmpeg_ok, ffmpeg_path = self._resolve_ffmpeg()
-
         if ffmpeg_path:
             import os
-            ffmpeg_dir = os.path.dirname(ffmpeg_path)
-            self.settings.set("_ffmpeg_location", ffmpeg_dir)
-            self.logger.info("FFmpeg location stored for yt-dlp: %s", ffmpeg_dir)
+            self.settings.set("_ffmpeg_location", os.path.dirname(ffmpeg_path))
+            self.logger.info("FFmpeg location: %s", os.path.dirname(ffmpeg_path))
+
+        # ── Detect JS runtime for yt-dlp ──────────────────────────────────────
+        self.js_runtime = self._detect_js_runtime()
 
         # ── Appearance ────────────────────────────────────────────────────────
         mode = self.settings.get("appearance_mode")
@@ -52,49 +55,37 @@ class YouTubeBatchDownloader(ctk.CTk):
             history_manager=self.history,
             settings=self.settings,
             ffmpeg_ok=self.ffmpeg_ok,
+            js_runtime=self.js_runtime,
         )
         self._main_window.pack(fill="both", expand=True)
 
-        # Only show the warning if FFmpeg truly could not be found
+        # Deferred warnings (after mainloop starts)
         if not self.ffmpeg_ok:
             self.after(300, self._show_ffmpeg_warning)
+        elif not self.js_runtime.available:
+            self.after(500, self._show_js_runtime_warning)
 
         self.logger.info(
-            "App started  |  FFmpeg OK: %s  |  Theme: %s",
-            self.ffmpeg_ok, mode,
+            "App started  |  FFmpeg OK: %s  |  JS runtime: %s  |  Theme: %s",
+            self.ffmpeg_ok,
+            f"{self.js_runtime.name} v{self.js_runtime.version}" if self.js_runtime.available else "none",
+            mode,
         )
 
     # ── FFmpeg resolution ─────────────────────────────────────────────────────
 
     def _resolve_ffmpeg(self) -> tuple[bool, str | None]:
-        """
-        Resolve FFmpeg using a two-strategy cascade:
-
-        Strategy 1: ffmpeg_manager (uses imageio-ffmpeg bundled binary).
-                    This is the primary path — zero user setup required.
-        Strategy 2: Legacy FFmpegChecker (system PATH, WinGet, Scoop, etc.)
-                    Retained for environments where imageio-ffmpeg is absent.
-
-        Returns:
-            (ffmpeg_ok: bool, ffmpeg_path: str | None)
-        """
-        # ── Strategy 1: imageio-ffmpeg bundled binary ─────────────────────────
+        """Try imageio-ffmpeg first, fall back to legacy FFmpegChecker."""
         try:
             from ffmpeg_manager import get_ffmpeg_path, FFmpegNotFoundError
             path = get_ffmpeg_path()
             self.logger.info("FFmpeg resolved via imageio-ffmpeg: %s", path)
             return True, path
         except ImportError:
-            self.logger.warning(
-                "ffmpeg_manager module not found. "
-                "Ensure ffmpeg_manager.py is present in the project root."
-            )
+            self.logger.warning("ffmpeg_manager not found; trying legacy checker.")
         except Exception as exc:
-            self.logger.warning(
-                "ffmpeg_manager failed (%s); falling back to legacy checker.", exc
-            )
+            self.logger.warning("ffmpeg_manager failed (%s); trying legacy checker.", exc)
 
-        # ── Strategy 2: Legacy FFmpegChecker ─────────────────────────────────
         try:
             from utils.ffmpeg_checker import FFmpegChecker
             ok = FFmpegChecker.check()
@@ -103,14 +94,40 @@ class YouTubeBatchDownloader(ctk.CTk):
                 self.logger.info("FFmpeg resolved via legacy checker: %s", path)
             else:
                 self.logger.error(
-                    "FFmpeg not found by any strategy. "
-                    "Install imageio-ffmpeg: pip install imageio-ffmpeg"
+                    "FFmpeg not found. Install imageio-ffmpeg: pip install imageio-ffmpeg"
                 )
             return ok, path
         except Exception as exc:
-            self.logger.error("Legacy FFmpegChecker raised: %s", exc)
+            self.logger.error("FFmpegChecker raised: %s", exc)
             return False, None
+
+    # ── JS runtime detection ──────────────────────────────────────────────────
+
+    def _detect_js_runtime(self):
+        """
+        Detect a JS runtime and store results in settings for DownloadEngine.
+        Returns a JsRuntimeResult (or a stub SimpleNamespace if module missing).
+        """
+        try:
+            from js_runtime_manager import detect_js_runtime
+            result = detect_js_runtime()
+            self.settings.set("_js_runtime_name", result.name)
+            self.settings.set("_js_runtime_path", result.path or "")
+            return result
+        except ImportError:
+            self.logger.warning("js_runtime_manager not found; JS runtime detection skipped.")
+        except Exception as exc:
+            self.logger.error("JS runtime detection failed: %s", exc)
+
+        from types import SimpleNamespace
+        return SimpleNamespace(available=False, name="none", path=None, version="")
+
+    # ── Warnings ──────────────────────────────────────────────────────────────
 
     def _show_ffmpeg_warning(self) -> None:
         from ui.dialogs import show_ffmpeg_warning
         show_ffmpeg_warning(self)
+
+    def _show_js_runtime_warning(self) -> None:
+        from ui.dialogs import show_js_runtime_warning
+        show_js_runtime_warning(self)

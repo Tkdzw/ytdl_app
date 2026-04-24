@@ -51,6 +51,18 @@ if errorlevel 1 (
 )
 echo [OK] PyInstaller ready.
 
+:: ── Check for Node.js (JS runtime for yt-dlp YouTube extraction) ────────────────
+echo [..] Checking for Node.js (required for YouTube downloads)...
+node --version >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] Node.js not found on PATH.
+    echo        YouTube downloads may fail for some videos.
+    echo        Install Node.js: https://nodejs.org/  or  winget install OpenJS.NodeJS
+    echo        You can continue the build without it - it is only needed at runtime.
+) else (
+    for /f "tokens=*" %%v in ('node --version 2^>^&1') do echo [OK] Node.js %%v
+)
+
 :: ── Verify imageio-ffmpeg can find its binary ─────────────────────────────────
 echo [..] Verifying bundled FFmpeg...
 python -c "import imageio_ffmpeg; p = imageio_ffmpeg.get_ffmpeg_exe(); print('[OK] Bundled FFmpeg:', p)"
