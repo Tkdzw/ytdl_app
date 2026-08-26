@@ -19,11 +19,29 @@ _log = AppLogger.get_logger(__name__)
 
 _DEFAULT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "YTBatchDL")
 
+# Chrome 125 on Windows 11 — matches what yt-dlp's web client sends
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "Chrome/125.0.0.0 Safari/537.36"
 )
+
+# extractor_args instructs yt-dlp which YouTube clients to try, in order.
+# - "web":        most compatible, uses the JS-solved n-param, rarely 403s
+# - "web_safari": Safari variant, good second choice
+# - "ios":        good fallback, no JS needed, handles most age-restricted content
+# - "mweb":       mobile web, light payload
+# Clients that frequently 403 or are being phased out are intentionally omitted:
+#   android_vr, android, android_music, tv_embedded
+_YT_CLIENTS = "web,web_safari,ios,mweb"
+
+# HTTP headers that match a real Chrome browser session
+_CHROME_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Sec-Fetch-Mode": "navigate",
+}
 
 # Strips ANSI colour codes yt-dlp embeds in error strings on Windows
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFABCDJsu]|\[0;3[0-9]m|\033\[[^a-zA-Z]*[a-zA-Z]")
@@ -160,7 +178,7 @@ class DownloadEngine:
 
         base_opts: dict = {
             "outtmpl": outtmpl,
-            "http_headers": {"User-Agent": _USER_AGENT},
+            "http_headers": _CHROME_HEADERS,
             "noprogress": True,
             "quiet": True,
             "no_warnings": False,
@@ -168,8 +186,19 @@ class DownloadEngine:
             "progress_hooks": [self._make_progress_hook(on_progress)],
             "postprocessor_hooks": [],
             "retries": req.max_retries,
+            "fragment_retries": req.max_retries,
             "concurrent_fragment_downloads": req.concurrent_fragments,
             "nooverwrites": req.skip_existing,
+            # Tell yt-dlp which YouTube clients to try, in order.
+            # This prevents it from defaulting to android_vr which 403s frequently.
+            "extractor_args": {
+                "youtube": {
+                    "player_client": [_YT_CLIENTS],
+                    # Skip the dash manifest check — speeds up extraction
+                    # and avoids a second request that can also 403
+                    "skip": ["dash", "hls"],
+                }
+            },
         }
 
         if req.rate_limit_kb > 0:
@@ -210,7 +239,7 @@ class DownloadEngine:
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
         return {
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "postprocessors": pps,
             "writethumbnail": embed_thumbnail,
         }
@@ -227,7 +256,7 @@ class DownloadEngine:
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
         opts: dict = {
-            "format": "bestvideo+bestaudio/best",
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
             "merge_output_format": merge_fmt,
             "postprocessors": pps,
             "writethumbnail": embed_thumbnail,
