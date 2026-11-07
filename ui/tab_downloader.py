@@ -46,6 +46,7 @@ class DownloaderTab(ctk.CTkFrame):
         self._worker: Optional[DownloadWorker] = None
         self._is_downloading = False
         self._queue_items: list[dict] = []
+        self._completed_results: list[DownloadResult] = []
         self._conv_worker = None
         self._is_converting = False
 
@@ -377,15 +378,32 @@ class DownloaderTab(ctk.CTkFrame):
             self._log_ui("No downloads queued.")
             return
 
+        self._run_requests(requests)
+
+    def retry_failed(self, items: list[dict]) -> None:
+        """Re-run the queue items that failed (called from the Batch Queue tab)."""
+        if self._is_downloading or self._is_converting:
+            self._log_ui("⚠ Wait for the current batch to finish before retrying.")
+            return
+        requests = [i["request"] for i in items if i.get("request")]
+        if not requests:
+            return
+        self._log_ui(f"↺ Retrying {len(requests)} failed download(s)…")
+        self._run_requests(requests)
+
+    def _run_requests(self, requests: list[DownloadRequest]) -> None:
+        """Populate the queue and start a DownloadWorker for *requests*."""
         self._queue_items = [
             {
                 "url": r.url,
                 "mode": r.mode,
                 "fmt": r.video_format if r.mode == "video" else "mp3",
                 "status": "Pending",
+                "request": r,
             }
             for r in requests
         ]
+        self._completed_results = []
         if self._on_queue_update:
             self._on_queue_update(self._queue_items)
 
@@ -403,9 +421,6 @@ class DownloaderTab(ctk.CTkFrame):
                 f"▶ Starting {len(requests)} download(s)…  "
                 f"[⚠ No JS runtime — install Node.js if downloads fail]"
             )
-
-        self._pending_output_dir = output_dir
-        self._pending_requests = requests
 
         self._worker = DownloadWorker(
             requests=requests,
@@ -457,14 +472,20 @@ class DownloaderTab(ctk.CTkFrame):
 
     # ── Post-download conversion ──────────────────────────────────────────────
 
-    def _start_conversion_batch(self, completed_results: list[DownloadResult]) -> None:
+    def _start_conversion_batch(self, completed_results: list[DownloadResult]) -> bool:
+        """Start converting the downloaded files. Returns True if a batch started."""
         if not self._conv_enabled_var.get():
-            return
+            return False
 
-        successful = [r for r in completed_results if r.success and r.filepath]
-        if not successful:
+        import os
+        files = [
+            path
+            for r in completed_results if r.success
+            for path in (r.filepaths or ([r.filepath] if r.filepath else []))
+        ]
+        if not files:
             self._log_ui("🔄 No files to convert.")
-            return
+            return False
 
         output_format = self._conv_format_var.get()
         bitrate = self._conv_bitrate_var.get()
@@ -474,22 +495,29 @@ class DownloaderTab(ctk.CTkFrame):
             from conversion_worker import ConversionRequest, ConversionWorker
         except ImportError:
             self._log_ui("❌ conversion_worker module not found — skipping conversion.")
-            return
+            return False
 
+        ffmpeg_dir = self._settings.get("_ffmpeg_location") or ""
         conv_requests = []
-        for result in successful:
-            import os
-            base, _ = os.path.splitext(result.filepath)
-            out = f"{base}.{output_format}"
+        for path in files:
+            base, ext = os.path.splitext(path)
+            if ext.lower().lstrip(".") == output_format.lower():
+                self._log_ui(
+                    f"🔄 Skipping {os.path.basename(path)} — already {output_format.upper()}."
+                )
+                continue
             conv_requests.append(
                 ConversionRequest(
-                    input_file=result.filepath,
-                    output_file=out,
+                    input_file=path,
+                    output_file=f"{base}.{output_format}",
                     output_format=output_format,
                     bitrate=bitrate,
                     delete_source=delete_source,
+                    ffmpeg_dir=ffmpeg_dir,
                 )
             )
+        if not conv_requests:
+            return False
 
         self._log_ui(
             f"🔄 Converting {len(conv_requests)} file(s) "
@@ -497,6 +525,8 @@ class DownloaderTab(ctk.CTkFrame):
         )
         self._status_label.configure(text="Converting…", text_color="#DCDCAA")
         self._cancel_btn.configure(state="normal")
+        self._download_btn.configure(state="disabled")
+        self._is_converting = True
 
         self._conv_worker = ConversionWorker(
             requests=conv_requests,
@@ -506,6 +536,7 @@ class DownloaderTab(ctk.CTkFrame):
             on_all_done=self._thread_safe_conv_all_done,
         )
         self._conv_worker.start()
+        return True
 
     # ── Thread-safe callbacks ─────────────────────────────────────────────────
 
@@ -554,10 +585,8 @@ class DownloaderTab(ctk.CTkFrame):
     def _apply_item_start(self, url: str, index: int, total: int) -> None:
         short = url if len(url) <= 55 else url[:52] + "…"
         self._current_item_label.configure(text=f"[{index}/{total}] {short}")
-        for item in self._queue_items:
-            if item["url"] == url:
-                item["status"] = "Downloading"
-                break
+        if 0 < index <= len(self._queue_items):
+            self._queue_items[index - 1]["status"] = "Downloading"
         if self._on_queue_update:
             self._on_queue_update(self._queue_items)
 
@@ -570,11 +599,11 @@ class DownloaderTab(ctk.CTkFrame):
             self._log_ui(f"❌ Failed: {result.url}\n   {result.error_message}")
 
         fmt_label = "mp3"
-        for item in self._queue_items:
-            if item["url"] == result.url:
-                fmt_label = item["fmt"]
-                item["status"] = "Completed" if result.success else "Failed"
-                break
+        if 0 < result.index <= len(self._queue_items):
+            item = self._queue_items[result.index - 1]
+            fmt_label = item["fmt"]
+            item["status"] = "Completed" if result.success else "Failed"
+        self._completed_results.append(result)
 
         self._history.add_entry(
             title=result.title,
@@ -600,30 +629,13 @@ class DownloaderTab(ctk.CTkFrame):
         self._status_label.configure(text="Done", text_color="#4CAF50")
         self._current_item_label.configure(text="")
 
-        if self._conv_enabled_var.get():
-            self._trigger_conversion_if_needed()
-
-    def _trigger_conversion_if_needed(self) -> None:
-        import os
-        from engine.downloader import DownloadResult
-
-        pseudo_results = []
-        for item in self._queue_items:
-            if item["status"] == "Completed":
-                entry = self._history.get_latest_entry(item["url"])
-                if entry and entry.get("filepath"):
-                    pseudo_results.append(
-                        DownloadResult(
-                            url=item["url"],
-                            title=item.get("fmt", ""),
-                            filepath=entry["filepath"],
-                            success=True,
-                        )
-                    )
-        if pseudo_results:
-            self._start_conversion_batch(pseudo_results)
+        # Convert straight from this batch's results (not via history lookups,
+        # which mismatch when the same URL is downloaded more than once).
+        if self._conv_enabled_var.get() and not (self._worker and self._worker.is_cancelled):
+            self._start_conversion_batch(self._completed_results)
 
     def _apply_conv_all_done(self) -> None:
+        self._is_converting = False
         self._set_downloading(False)
         self._cancel_btn.configure(state="disabled")
         self._log_ui("🔄 All conversions finished.")

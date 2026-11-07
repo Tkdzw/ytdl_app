@@ -33,7 +33,9 @@ _USER_AGENT = (
 # - "mweb":       mobile web, light payload
 # Clients that frequently 403 or are being phased out are intentionally omitted:
 #   android_vr, android, android_music, tv_embedded
-_YT_CLIENTS = "web,web_safari,ios,mweb"
+# Must be a list of separate names: yt-dlp treats each list element as one
+# client, so a single comma-joined string is rejected as "unsupported client".
+_YT_CLIENTS = ["web", "web_safari", "ios", "mweb"]
 
 # HTTP headers that match a real Chrome browser session
 _CHROME_HEADERS = {
@@ -89,6 +91,41 @@ class DownloadResult:
     filepath: str
     success: bool
     error_message: str = ""
+    # Every final file produced (several for a playlist URL). ``filepath`` is
+    # the first of these, kept for callers that only need one.
+    filepaths: list[str] = field(default_factory=list)
+    # 1-based position in the worker's request list, so callers can match
+    # results to queue rows even when the same URL appears twice.
+    index: int = 0
+
+
+def _final_filepaths(info: dict, ydl: "yt_dlp.YoutubeDL") -> list[str]:
+    """
+    Return the on-disk paths of the finished files for *info*.
+
+    ``prepare_filename`` gives the name *before* post-processing (e.g. .webm
+    for an audio download that became .mp3), so prefer the ``filepath`` that
+    yt-dlp records in ``requested_downloads`` after post-processors run.
+    Playlists are walked recursively.
+    """
+    if not info:
+        return []
+    entries = info.get("entries")
+    if entries is not None:
+        paths: list[str] = []
+        for entry in entries:
+            if entry:
+                paths.extend(_final_filepaths(entry, ydl))
+        return paths
+    paths = [
+        d["filepath"]
+        for d in info.get("requested_downloads") or []
+        if d.get("filepath")
+    ]
+    if paths:
+        return paths
+    # Fallback (e.g. file skipped as already present): best guess
+    return [ydl.prepare_filename(info)]
 
 
 # ── Callback aliases ──────────────────────────────────────────────────────────
@@ -147,16 +184,17 @@ class DownloadEngine:
         os.makedirs(request.output_dir, exist_ok=True)
         ydl_opts = self._build_opts(request, on_progress, on_log)
         title = request.url
-        filepath = ""
+        filepaths: list[str] = []
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(request.url, download=True)
                 if info:
                     title = info.get("title", request.url)
-                    filepath = ydl.prepare_filename(info)
+                    filepaths = _final_filepaths(info, ydl)
             return DownloadResult(url=request.url, title=title,
-                                  filepath=filepath, success=True)
+                                  filepath=filepaths[0] if filepaths else "",
+                                  success=True, filepaths=filepaths)
         except yt_dlp.utils.DownloadError as exc:
             msg = _strip_ansi(str(exc))
             _log.error("DownloadError for %s: %s", request.url, msg)
@@ -193,7 +231,7 @@ class DownloadEngine:
             # This prevents it from defaulting to android_vr which 403s frequently.
             "extractor_args": {
                 "youtube": {
-                    "player_client": [_YT_CLIENTS],
+                    "player_client": list(_YT_CLIENTS),
                     # Skip the dash manifest check — speeds up extraction
                     # and avoids a second request that can also 403
                     "skip": ["dash", "hls"],
@@ -359,6 +397,7 @@ class DownloadWorker(threading.Thread):
             result = self._engine.download(
                 req, on_progress=self._on_progress, on_log=self._on_log
             )
+            result.index = index
 
             if result.success:
                 completed += 1

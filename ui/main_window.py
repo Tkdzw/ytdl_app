@@ -57,7 +57,10 @@ class MainWindow(ctk.CTkFrame):
         self._content = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self._content.pack(side="left", fill="both", expand=True)
 
-        self._batch_queue_tab = BatchQueueTab(self._content)
+        self._batch_queue_tab = BatchQueueTab(
+            self._content,
+            on_retry=lambda items: self._downloader_tab.retry_failed(items),
+        )
 
         self._downloader_tab = DownloaderTab(
             self._content,

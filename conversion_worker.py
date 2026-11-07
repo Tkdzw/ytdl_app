@@ -71,6 +71,9 @@ class ConversionRequest:
     delete_source: bool = False
     """If True, source file is deleted after a successful conversion."""
 
+    ffmpeg_dir: str = ""
+    """Folder holding the ffmpeg binary (Settings > Tools). Blank = system PATH."""
+
     def __post_init__(self) -> None:
         # Auto-generate output path if not provided
         if not self.output_file:
@@ -168,7 +171,7 @@ class ConversionWorker(threading.Thread):
 
         self._emit_log(
             f"[conversion] Batch starting: {total} item(s), "
-            f"FFmpeg {get_ffmpeg_version()}"
+            f"FFmpeg {get_ffmpeg_version(self._requests[0].ffmpeg_dir if self._requests else '')}"
         )
 
         for index, req in enumerate(self._requests, start=1):
@@ -214,6 +217,7 @@ class ConversionWorker(threading.Thread):
                 req.output_file,
                 output_format=req.output_format,
                 bitrate=req.bitrate,
+                saved_ffmpeg_dir=req.ffmpeg_dir,
                 on_progress=self._on_progress,
                 on_log=self._on_log,
             )
