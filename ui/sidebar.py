@@ -6,10 +6,13 @@ from __future__ import annotations
 from typing import Callable
 import customtkinter as ctk
 
+import app_info
+
+from ui import theme
+
 
 NAV_ITEMS = [
     ("📥", "Downloader"),
-    ("📦", "Batch Queue"),
     ("📜", "History"),
     ("⚙️",  "Settings"),
 ]
@@ -47,12 +50,12 @@ class Sidebar(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self,
-            text="Batch Edition",
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
+            text=f"Version {app_info.VERSION}",
+            font=ctk.CTkFont(size=12),
+            text_color=theme.MUTED,
         ).pack(padx=12, pady=(0, 20))
 
-        ctk.CTkFrame(self, height=1, fg_color="#333").pack(fill="x", padx=12, pady=(0, 16))
+        ctk.CTkFrame(self, height=1, fg_color=theme.DIVIDER).pack(fill="x", padx=12, pady=(0, 16))
 
         for icon, label in NAV_ITEMS:
             btn = ctk.CTkButton(
@@ -62,7 +65,7 @@ class Sidebar(ctk.CTkFrame):
                 height=42,
                 fg_color="transparent",
                 text_color=("gray20", "gray80"),
-                hover_color=("gray85", "#2A2D2E"),
+                hover_color=theme.HOVER,
                 font=ctk.CTkFont(size=14),
                 command=lambda t=label: self._activate(t),
             )
@@ -78,8 +81,8 @@ class Sidebar(ctk.CTkFrame):
         self._update_badge = ctk.CTkLabel(
             bottom,
             text="",
-            font=ctk.CTkFont(size=10),
-            text_color="#DCDCAA",
+            font=ctk.CTkFont(size=12),
+            text_color=theme.WARN,
         )
         self._update_badge.pack(pady=(0, 6))
 
@@ -88,17 +91,17 @@ class Sidebar(ctk.CTkFrame):
             text="ℹ  About",
             height=32,
             fg_color="transparent",
-            text_color=("gray40", "gray60"),
-            hover_color=("gray85", "#2A2D2E"),
+            text_color=theme.MUTED,
+            hover_color=theme.HOVER,
             font=ctk.CTkFont(size=12),
             command=self._show_about,
         ).pack(fill="x")
 
         ctk.CTkLabel(
             bottom,
-            text="v1.0.0",
-            font=ctk.CTkFont(size=10),
-            text_color="gray",
+            text=f"by {app_info.DEVELOPER}",
+            font=ctk.CTkFont(size=12),
+            text_color=theme.MUTED,
         ).pack(pady=(4, 0))
 
     # ── Public ────────────────────────────────────────────────────────────────
@@ -107,6 +110,11 @@ class Sidebar(ctk.CTkFrame):
         """Display a subtle update hint in the sidebar."""
         if self._update_badge:
             self._update_badge.configure(text=f"yt-dlp {latest} available")
+
+    def select(self, tab: str) -> None:
+        """Switch tabs programmatically (keyboard shortcuts)."""
+        if tab in self._buttons:
+            self._activate(tab)
 
     # ── State ─────────────────────────────────────────────────────────────────
 

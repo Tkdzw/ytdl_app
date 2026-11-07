@@ -1,8 +1,8 @@
-# build.spec — PyInstaller spec for YT Batch Downloader
+# build.spec — PyInstaller spec for YT Downloader
 # ─────────────────────────────────────────────────────────────────────────────
-# FFmpeg is NOT bundled. Users must install FFmpeg separately and set the
-# bin folder in Settings > Tools, or add it to their system PATH.
-# Download FFmpeg: https://ffmpeg.org/download.html
+# FFmpeg and Deno are bundled when vendor/ffmpeg and vendor/deno exist
+# (build_windows.bat fills them via scripts/fetch_tools.ps1). They land in
+# <app>/_internal/tools/, where utils/tool_setup.py looks first.
 #
 # Build command (from the ytdl_app/ directory):
 #   pyinstaller build.spec --clean
@@ -30,12 +30,50 @@ _SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 _ICON_PATH = os.path.join(_SPEC_DIR, "icon.ico")
 ICON = _ICON_PATH if os.path.isfile(_ICON_PATH) else None
 
+# ── App name / version (app_info.py is the single source of truth) ────────────
+import sys as _sys
+_sys.path.insert(0, _SPEC_DIR)
+import app_info
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable,
+    VarFileInfo, VarStruct, VSVersionInfo,
+)
+_ver = tuple(int(x) for x in app_info.VERSION.split(".")) + (0,)
+# Shown in the .exe's Properties > Details tab
+VERSION_INFO = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=_ver, prodvers=_ver),
+    kids=[
+        StringFileInfo([StringTable("040904B0", [
+            StringStruct("CompanyName", app_info.DEVELOPER),
+            StringStruct("FileDescription", app_info.APP_NAME),
+            StringStruct("FileVersion", app_info.VERSION),
+            StringStruct("InternalName", app_info.APP_ID),
+            StringStruct("LegalCopyright", app_info.COPYRIGHT),
+            StringStruct("OriginalFilename", f"{app_info.APP_ID}.exe"),
+            StringStruct("ProductName", app_info.APP_NAME),
+            StringStruct("ProductVersion", app_info.VERSION),
+        ])]),
+        VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+    ],
+)
+print(f"[build.spec] {app_info.APP_NAME} {app_info.VERSION}")
+
 # ── datas ─────────────────────────────────────────────────────────────────────
 _datas = [
     (str(CTK_DIR), "customtkinter"),
 ]
 if _HAS_EJS and YT_DLP_EJS_DIR:
     _datas.append((str(YT_DLP_EJS_DIR), "yt_dlp_ejs"))
+
+# ── Bundled tools (FFmpeg + Deno) ─────────────────────────────────────────────
+for _tool, _exe in (("ffmpeg", "ffmpeg.exe"), ("deno", "deno.exe")):
+    _src = os.path.join(_SPEC_DIR, "vendor", _tool)
+    if os.path.isfile(os.path.join(_src, _exe)):
+        _datas.append((_src, os.path.join("tools", _tool)))
+        print(f"[build.spec] bundling {_tool}: {_src}")
+    else:
+        print(f"WARNING: vendor/{_tool} missing - run scripts/fetch_tools.ps1 "
+              f"or the app will need {_tool} installed separately.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -47,7 +85,6 @@ a = Analysis(
     hiddenimports=[
         # ── App modules ───────────────────────────────────────────────────────
         "ffmpeg_manager",
-        "conversion_worker",
         "js_runtime_manager",
         # ── yt-dlp-ejs ────────────────────────────────────────────────────────
         "yt_dlp_ejs",
@@ -75,14 +112,15 @@ a = Analysis(
         "mutagen",
         "certifi",
         # ── App packages ──────────────────────────────────────────────────────
-        "engine", "engine.downloader",
+        "engine", "engine.downloader", "engine.download_queue",
         "ui", "ui.main_window", "ui.sidebar", "ui.dialogs",
-        "ui.tab_downloader", "ui.tab_batch_queue",
+        "ui.tab_downloader", "ui.queue_list", "ui.setup_dialog",
         "ui.tab_history", "ui.tab_settings",
-        "utils", "utils.logger", "utils.ffmpeg_checker",
+        "utils", "utils.logger", "utils.tool_setup", "utils.error_messages",
         "utils.history_manager", "utils.settings_manager",
         "utils.url_validator", "utils.thumbnail_fetcher",
         "utils.update_checker",
+        "app_info", "ui.theme", "ui.tooltip",
         # ── stdlib ────────────────────────────────────────────────────────────
         "email", "email.mime", "email.mime.text", "email.mime.multipart",
         "email.header", "email.utils",
@@ -106,7 +144,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="YTBatchDownloader",
+    name=app_info.APP_ID,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -118,6 +156,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version=VERSION_INFO,
     **({ "icon": ICON } if ICON else {}),
 )
 
@@ -129,5 +168,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="YTBatchDownloader",
+    name=app_info.APP_ID,
 )

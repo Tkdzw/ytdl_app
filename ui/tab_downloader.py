@@ -1,27 +1,52 @@
 """
-UI Tab: Downloader — URL input, mode selector, progress display.
+UI Tab: Downloader — the home screen.
+
+Paste links → they appear in the download list (with title + thumbnail) →
+Start. The list shows every item's status with per-row actions; overall
+progress, a finish banner and plain-language errors sit around it. The
+raw yt-dlp log is still available behind "Show details".
 """
 from __future__ import annotations
 
-from typing import Optional, Callable
+import os
+import subprocess
+import sys
+import time
+from typing import Callable, Optional
 
 import customtkinter as ctk
 
-from engine.downloader import (
-    DownloadRequest,
-    DownloadResult,
-    DownloadWorker,
-    ProgressData,
-    _DEFAULT_OUTPUT_DIR,
+from ui import theme
+
+from engine.download_queue import (
+    CANCELLED, COMPLETED, DOWNLOADING, FAILED, READY,
+    DownloadQueue, QueueItem, QueueWorker,
 )
-from utils.history_manager import HistoryManager
-from utils.settings_manager import SettingsManager
-from utils.url_validator import validate_urls
-from utils.thumbnail_fetcher import fetch_thumbnail_async
-from utils.logger import AppLogger
+from engine.downloader import DownloadRequest, DownloadResult, ProgressData, _DEFAULT_OUTPUT_DIR
 from ui.dialogs import FormatDialog
+from ui.queue_list import QueueList
+from utils.history_manager import HistoryManager
+from utils.logger import AppLogger
+from utils.settings_manager import SettingsManager
+from utils.thumbnail_fetcher import fetch_preview_async, to_ctk_image
+from utils.url_validator import validate_urls
 
 _log = AppLogger.get_logger(__name__)
+
+_AUDIO_LABEL = "Audio (MP3)"          # also the stored "default_mode" value
+_VIDEO_QUALITIES = ["Best", "1080p", "720p", "480p"]
+_AUDIO_QUALITIES = ["128 kbps", "192 kbps", "256 kbps", "320 kbps"]
+_QUALITY_HINTS = {
+    "Best":     "Highest available – can be 4K and very large",
+    "1080p":    "Full HD – recommended",
+    "720p":     "HD – smaller files",
+    "480p":     "Smallest video files",
+    "128 kbps": "Smallest files",
+    "192 kbps": "Good quality – recommended",
+    "256 kbps": "High quality",
+    "320 kbps": "Highest quality – larger files",
+}
+_OK, _BAD, _WARN, _INFO = theme.OK, theme.BAD, theme.WARN, theme.INFO
 
 
 class DownloaderTab(ctk.CTkFrame):
@@ -34,7 +59,7 @@ class DownloaderTab(ctk.CTkFrame):
         settings: SettingsManager,
         ffmpeg_ok: bool,
         js_runtime=None,
-        on_queue_update: Optional[Callable] = None,
+        on_fix_setup: Optional[Callable[[], None]] = None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
@@ -42,263 +67,281 @@ class DownloaderTab(ctk.CTkFrame):
         self._settings = settings
         self._ffmpeg_ok = ffmpeg_ok
         self._js_runtime = js_runtime
-        self._on_queue_update = on_queue_update
-        self._worker: Optional[DownloadWorker] = None
-        self._is_downloading = False
-        self._queue_items: list[dict] = []
-        self._completed_results: list[DownloadResult] = []
-        self._conv_worker = None
-        self._is_converting = False
+        self._on_fix_setup = on_fix_setup
+        self._queue = DownloadQueue()
+        self._worker: Optional[QueueWorker] = None
+        self._user_stopped = False
+        self._run_ids: set[int] = set()       # items processed in the current run
+        self._details_open = False
 
         self._build()
+        self._bind_keys()
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        # Header
+        # Header + setup chip
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.pack(fill="x", padx=24, pady=(20, 8))
+        header.pack(fill="x", padx=24, pady=(18, 6))
+        ctk.CTkLabel(header, text="📥  Download videos",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(side="left")
+        self._chips = ctk.CTkFrame(header, fg_color="transparent")
+        self._chips.pack(side="right")
+        self._render_chips()
 
-        ctk.CTkLabel(
-            header,
-            text="📥  Download Videos",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(side="left")
-
-        # Status chips (FFmpeg + JS runtime)
-        chips = ctk.CTkFrame(header, fg_color="transparent")
-        chips.pack(side="right")
-
-        if not self._ffmpeg_ok:
-            ctk.CTkLabel(
-                chips,
-                text="⚠ FFmpeg missing",
-                text_color="#FF6B6B",
-                font=ctk.CTkFont(size=12),
-            ).pack(side="right", padx=(8, 0))
-
-        js_ok = self._js_runtime and self._js_runtime.available
-        if js_ok:
-            rt = self._js_runtime
-            ctk.CTkLabel(
-                chips,
-                text=f"✓ {rt.name} v{rt.version}",
-                text_color="#4CAF50",
-                font=ctk.CTkFont(size=11),
-            ).pack(side="right", padx=(0, 12))
-        else:
-            ctk.CTkLabel(
-                chips,
-                text="⚠ No JS runtime — some videos may fail",
-                text_color="#DCDCAA",
-                font=ctk.CTkFont(size=11),
-            ).pack(side="right", padx=(0, 12))
-
-        # ── URL input + thumbnail ─────────────────────────────────────────────
-        main_row = ctk.CTkFrame(self, fg_color="transparent")
-        main_row.pack(fill="x", padx=24, pady=(0, 8))
-
-        left = ctk.CTkFrame(main_row, fg_color="transparent")
-        left.pack(side="left", fill="both", expand=True)
-
-        ctk.CTkLabel(
-            left,
-            text="Paste URLs (one per line):",
-            font=ctk.CTkFont(size=13),
-            anchor="w",
-        ).pack(fill="x", pady=(0, 2))
-
-        self._url_box = ctk.CTkTextbox(left, height=120, font=ctk.CTkFont(size=12))
+        # Link input
+        input_row = ctk.CTkFrame(self, fg_color="transparent")
+        input_row.pack(fill="x", padx=24)
+        left = ctk.CTkFrame(input_row, fg_color="transparent")
+        left.pack(side="left", fill="x", expand=True)
+        label_row = ctk.CTkFrame(left, fg_color="transparent")
+        label_row.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(label_row, text="Paste links (one per line):", anchor="w",
+                     font=ctk.CTkFont(size=13)).pack(side="left")
+        ctk.CTkLabel(label_row, text="Ctrl+V anywhere adds links  ·  Ctrl+Enter starts",
+                     font=theme.font(12), text_color=theme.MUTED).pack(side="right")
+        self._url_box = ctk.CTkTextbox(left, height=72, font=ctk.CTkFont(size=13))
         self._url_box.pack(fill="x")
         self._url_box.bind("<FocusOut>", lambda _: self._validate_urls_live())
-
-        self._validation_label = ctk.CTkLabel(
-            left, text="", font=ctk.CTkFont(size=11), anchor="w", text_color="gray"
-        )
+        self._url_box.bind("<<Paste>>", lambda _: self.after(50, self._validate_urls_live))
+        self._validation_label = ctk.CTkLabel(left, text="", anchor="w", justify="left",
+                                              font=ctk.CTkFont(size=12), text_color=theme.MUTED)
         self._validation_label.pack(fill="x", pady=(2, 0))
 
-        thumb_panel = ctk.CTkFrame(
-            main_row, width=180, fg_color=("gray90", "#1E1E1E"), corner_radius=8
-        )
-        thumb_panel.pack(side="right", fill="y", padx=(12, 0))
-        thumb_panel.pack_propagate(False)
-        self._thumb_label = ctk.CTkLabel(
-            thumb_panel, text="Thumbnail\npreview",
-            font=ctk.CTkFont(size=11), text_color="gray",
-        )
-        self._thumb_label.pack(expand=True)
-
-        # ── Mode + output dir ─────────────────────────────────────────────────
-        controls = ctk.CTkFrame(self, fg_color="transparent")
-        controls.pack(fill="x", padx=24, pady=(8, 8))
-
-        ctk.CTkLabel(controls, text="Mode:", font=ctk.CTkFont(size=13)).pack(side="left")
-        self._mode_var = ctk.StringVar(value=self._settings.get("default_mode"))
-        ctk.CTkSegmentedButton(
-            controls, values=["Video", "Audio (MP3)"],
-            variable=self._mode_var, width=200,
-        ).pack(side="left", padx=(8, 24))
-
-        ctk.CTkLabel(controls, text="Output folder:", font=ctk.CTkFont(size=13)).pack(side="left")
-        self._outdir_var = ctk.StringVar(value=self._settings.get("output_dir"))
-        ctk.CTkEntry(
-            controls, textvariable=self._outdir_var,
-            width=260, font=ctk.CTkFont(size=11),
-        ).pack(side="left", padx=(8, 8))
         ctk.CTkButton(
-            controls, text="Browse", width=70, command=self._browse_folder
-        ).pack(side="left")
+            input_row, text="+ Add to list", width=120, height=34,
+            fg_color="transparent", text_color=theme.TEXT, border_width=1, command=self._add_from_box,
+        ).pack(side="left", padx=(10, 0), anchor="n", pady=(26, 0))
 
-        # ── Post-download conversion panel ────────────────────────────────────
-        self._build_conversion_panel()
+        # What to download + quality
+        controls = ctk.CTkFrame(self, fg_color="transparent")
+        controls.pack(fill="x", padx=24, pady=(6, 4))
+        ctk.CTkLabel(controls, text="Download:", font=ctk.CTkFont(size=13)).pack(side="left")
+        self._mode_var = ctk.StringVar()
+        self._type_menu = ctk.CTkOptionMenu(controls, variable=self._mode_var, width=150,
+                                            command=lambda _: self._on_type_changed())
+        self._type_menu.pack(side="left", padx=(8, 20))
+        ctk.CTkLabel(controls, text="Quality:", font=ctk.CTkFont(size=13)).pack(side="left")
+        self._quality_var = ctk.StringVar()
+        self._quality_menu = ctk.CTkOptionMenu(controls, variable=self._quality_var, width=120,
+                                               command=lambda _: self._on_quality_changed())
+        self._quality_menu.pack(side="left", padx=(8, 12))
+        self._quality_hint = ctk.CTkLabel(controls, text="", font=ctk.CTkFont(size=12),
+                                          text_color=theme.MUTED)
+        self._quality_hint.pack(side="left")
+        self._refresh_type_menu()
+        self._set_type_from_settings()
 
-        # ── Action buttons ────────────────────────────────────────────────────
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=24, pady=(0, 12))
+        # Output folder (remembered)
+        out_row = ctk.CTkFrame(self, fg_color="transparent")
+        out_row.pack(fill="x", padx=24, pady=(4, 8))
+        ctk.CTkLabel(out_row, text="Save to:", font=ctk.CTkFont(size=13)).pack(side="left")
+        self._outdir_var = ctk.StringVar(value=self._settings.get("output_dir"))
+        ctk.CTkEntry(out_row, textvariable=self._outdir_var,
+                     font=ctk.CTkFont(size=12)).pack(side="left", fill="x", expand=True, padx=8)
+        ctk.CTkButton(out_row, text="Browse", width=70,
+                      command=self._browse_folder).pack(side="left")
+        self._outdir_var.trace_add("write", lambda *_: self._save_output_dir())
 
+        # Actions + overall progress
+        act = ctk.CTkFrame(self, fg_color="transparent")
+        act.pack(fill="x", padx=24, pady=(2, 4))
         self._download_btn = ctk.CTkButton(
-            btn_row,
-            text="▶  Start Download",
-            width=180, height=40,
+            act, text="▶  Start download", width=180, height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#1A7F3C", hover_color="#145C2C",
-            command=self._start_download,
-            state="normal" if self._ffmpeg_ok else "disabled",
+            fg_color=theme.GO_BTN, hover_color=theme.GO_HOVER, command=self._start_download,
         )
-        self._download_btn.pack(side="left", padx=(0, 12))
-
+        self._download_btn.pack(side="left", padx=(0, 10))
         self._cancel_btn = ctk.CTkButton(
-            btn_row, text="⏹  Cancel",
-            width=120, height=40,
-            font=ctk.CTkFont(size=13),
-            fg_color="#7F1A1A", hover_color="#5C1414",
-            command=self._cancel_download,
+            act, text="■  Stop", width=100, height=40, font=ctk.CTkFont(size=13),
+            fg_color=theme.STOP_BTN, hover_color=theme.STOP_HOVER, command=self._cancel_download,
             state="disabled",
         )
-        self._cancel_btn.pack(side="left", padx=(0, 16))
+        self._cancel_btn.pack(side="left", padx=(0, 14))
+        self._overall_label = ctk.CTkLabel(act, text="", font=ctk.CTkFont(size=13),
+                                           anchor="w")
+        self._overall_label.pack(side="left", fill="x", expand=True)
+        self._clear_btn = ctk.CTkButton(act, text="Clear finished", width=110, height=30,
+                                        fg_color="transparent", text_color=theme.TEXT, border_width=1,
+                                        command=self._clear_finished)
+        self._clear_btn.pack(side="right")
+        self._retry_all_btn = ctk.CTkButton(act, text="↺ Retry failed", width=110, height=30,
+                                            fg_color="transparent", text_color=theme.TEXT, border_width=1,
+                                            command=self._retry_all_failed)
+        self._retry_all_btn.pack(side="right", padx=6)
 
-        self._current_item_label = ctk.CTkLabel(
-            btn_row, text="", font=ctk.CTkFont(size=11), text_color="gray",
+        self._overall_bar = ctk.CTkProgressBar(self, height=8)
+        self._overall_bar.set(0)
+        self._overall_bar.pack(fill="x", padx=24, pady=(2, 6))
+
+        # Finish banner (hidden until a run completes)
+        self._banner = ctk.CTkFrame(self, corner_radius=8, fg_color=theme.BANNER_OK)
+        self._banner_label = ctk.CTkLabel(self._banner, text="", anchor="w",
+                                          font=ctk.CTkFont(size=13, weight="bold"))
+        self._banner_label.pack(side="left", padx=14, pady=8, fill="x", expand=True)
+        ctk.CTkButton(self._banner, text="✕", width=30, height=28, fg_color="transparent", text_color=theme.TEXT,
+                      command=self._hide_banner).pack(side="right", padx=(0, 8))
+        self._banner_open = ctk.CTkButton(self._banner, text="Open folder", width=110, height=30,
+                                          command=self._open_output_folder)
+        self._banner_open.pack(side="right", padx=4)
+        self._banner_play = ctk.CTkButton(self._banner, text="▶ Play", width=80, height=30,
+                                          fg_color="transparent", text_color=theme.TEXT, border_width=1)
+        self._banner_anchor = ctk.CTkFrame(self, height=0, fg_color="transparent")
+        self._banner_anchor.pack(fill="x", padx=24)
+
+        # Download list
+        self._list = QueueList(self, on_action=self._on_row_action, height=220)
+        self._list.pack(fill="both", expand=True, padx=24, pady=(4, 6))
+
+        # Details (technical log), collapsed by default
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=24, pady=(0, 4))
+        self._details_btn = ctk.CTkButton(
+            footer, text="▸ Show details", width=120, height=26, anchor="w",
+            fg_color="transparent", text_color=theme.MUTED,
+            hover_color=theme.HOVER, command=self._toggle_details,
         )
-        self._current_item_label.pack(side="left")
+        self._details_btn.pack(side="left")
+        self._clear_log_btn = ctk.CTkButton(footer, text="Clear log", width=80, height=26,
+                                            fg_color="transparent", text_color=theme.TEXT, border_width=1,
+                                            command=self._clear_log)
+        self._log_box = ctk.CTkTextbox(self, height=140, state="disabled",
+                                       font=ctk.CTkFont(family="Consolas", size=12))
 
-        # ── Progress ──────────────────────────────────────────────────────────
-        prog_frame = ctk.CTkFrame(self)
-        prog_frame.pack(fill="x", padx=24, pady=(0, 8))
+        self._apply_ffmpeg_state()
+        self._refresh_overall()
 
-        stats_row = ctk.CTkFrame(prog_frame, fg_color="transparent")
-        stats_row.pack(fill="x", padx=16, pady=(12, 4))
+    def _bind_keys(self) -> None:
+        top = self.winfo_toplevel()
+        top.bind("<Control-Return>", lambda _: self._start_download(), add="+")
+        self._url_box.bind("<Control-Return>", lambda _: (self._start_download(), "break")[1])
+        for seq in ("<Control-v>", "<Control-V>"):
+            top.bind(seq, self._paste_anywhere, add="+")
+        for seq in ("<Control-l>", "<Control-L>"):
+            top.bind(seq, lambda _: (self._url_box.focus_set(), "break")[1], add="+")
 
-        self._pct_label = ctk.CTkLabel(
-            stats_row, text="0%",
-            font=ctk.CTkFont(size=13, weight="bold"), width=45,
-        )
-        self._pct_label.pack(side="left")
+    def _paste_anywhere(self, _event=None):
+        """Ctrl+V while not typing in a text field: add clipboard links to the list."""
+        if not self.winfo_ismapped():
+            return None                       # another tab is showing
+        focus = self.focus_get()
+        if focus is not None and focus.winfo_class() in ("Entry", "Text", "TEntry"):
+            return None                       # normal paste into that field
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            return None
+        if not text.strip():
+            return None
+        self._url_box.delete("1.0", "end")
+        self._url_box.insert("1.0", text.strip())
+        added = self._add_from_box()
+        self._overall_label.configure(
+            text=f"Added {added} link(s) from the clipboard." if added
+            else "The clipboard doesn't contain a web link.",
+            text_color=theme.TEXT if added else _WARN)
+        return "break"
 
-        self._speed_label = ctk.CTkLabel(
-            stats_row, text="Speed: —",
-            font=ctk.CTkFont(size=12), text_color="gray",
-        )
-        self._speed_label.pack(side="left", padx=16)
+    # ── Setup chips ───────────────────────────────────────────────────────────
 
-        self._eta_label = ctk.CTkLabel(
-            stats_row, text="ETA: —",
-            font=ctk.CTkFont(size=12), text_color="gray",
-        )
-        self._eta_label.pack(side="left")
-
-        self._status_label = ctk.CTkLabel(
-            stats_row, text="Idle",
-            font=ctk.CTkFont(size=12), text_color="#4EC9B0",
-        )
-        self._status_label.pack(side="right", padx=8)
-
-        self._progress_bar = ctk.CTkProgressBar(prog_frame, height=10)
-        self._progress_bar.pack(fill="x", padx=16, pady=(0, 12))
-        self._progress_bar.set(0)
-
-        # ── Log ───────────────────────────────────────────────────────────────
-        log_header = ctk.CTkFrame(self, fg_color="transparent")
-        log_header.pack(fill="x", padx=24)
-        ctk.CTkLabel(
-            log_header, text="Activity Log:",
-            font=ctk.CTkFont(size=13), anchor="w",
-        ).pack(side="left")
-        ctk.CTkButton(
-            log_header, text="Clear", width=55, height=24,
-            fg_color="transparent", border_width=1,
-            font=ctk.CTkFont(size=11),
-            command=self._clear_log,
-        ).pack(side="right")
-
-        self._log_box = ctk.CTkTextbox(
-            self, font=ctk.CTkFont(family="Courier", size=11), state="disabled",
-        )
-        self._log_box.pack(fill="both", expand=True, padx=24, pady=(4, 20))
-
-    def _build_conversion_panel(self) -> None:
-        conv_frame = ctk.CTkFrame(
-            self, fg_color=("gray92", "#1A1A2E"), corner_radius=8
-        )
-        conv_frame.pack(fill="x", padx=24, pady=(0, 8))
-
-        header_row = ctk.CTkFrame(conv_frame, fg_color="transparent")
-        header_row.pack(fill="x", padx=16, pady=(10, 6))
-
-        ctk.CTkLabel(
-            header_row,
-            text="🔄  Post-download Conversion  (powered by imageio-ffmpeg)",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        ).pack(side="left")
-
-        self._conv_enabled_var = ctk.BooleanVar(value=False)
-        ctk.CTkSwitch(
-            header_row, text="Enable",
-            variable=self._conv_enabled_var,
-            onvalue=True, offvalue=False, width=80,
-            command=self._on_conv_toggle,
-        ).pack(side="right")
-
-        self._conv_options_frame = ctk.CTkFrame(conv_frame, fg_color="transparent")
-        self._conv_options_frame.pack(fill="x", padx=16, pady=(0, 10))
-
-        ctk.CTkLabel(self._conv_options_frame, text="Format:",
-                     font=ctk.CTkFont(size=12)).pack(side="left")
-        self._conv_format_var = ctk.StringVar(value="mp3")
-        ctk.CTkSegmentedButton(
-            self._conv_options_frame,
-            values=["mp3", "wav", "mp4", "m4a"],
-            variable=self._conv_format_var, width=220,
-        ).pack(side="left", padx=(8, 24))
-
-        ctk.CTkLabel(self._conv_options_frame, text="Bitrate:",
-                     font=ctk.CTkFont(size=12)).pack(side="left")
-        self._conv_bitrate_var = ctk.StringVar(value="192k")
-        ctk.CTkSegmentedButton(
-            self._conv_options_frame,
-            values=["128k", "192k", "256k", "320k"],
-            variable=self._conv_bitrate_var, width=220,
-        ).pack(side="left", padx=(8, 24))
-
-        self._del_source_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            self._conv_options_frame,
-            text="Delete source after conversion",
-            variable=self._del_source_var,
-            font=ctk.CTkFont(size=11),
-        ).pack(side="left")
-
-        self._conv_options_frame.pack_forget()
-
-    # ── Conversion toggle ─────────────────────────────────────────────────────
-
-    def _on_conv_toggle(self) -> None:
-        if self._conv_enabled_var.get():
-            self._conv_options_frame.pack(fill="x", padx=16, pady=(0, 10))
-            self._log_ui("🔄 Post-download conversion enabled.")
+    def _render_chips(self) -> None:
+        for child in self._chips.winfo_children():
+            child.destroy()
+        js_ok = bool(self._js_runtime and self._js_runtime.available)
+        if not self._ffmpeg_ok:
+            self._make_fix_chip("⚠ FFmpeg missing – Fix", _BAD).pack(side="right")
+        elif not js_ok:
+            self._make_fix_chip("⚠ Setup incomplete – Fix", _WARN).pack(side="right")
         else:
-            self._conv_options_frame.pack_forget()
-            self._log_ui("🔄 Post-download conversion disabled.")
+            ctk.CTkLabel(self._chips, text="✓ Ready", text_color=_OK,
+                         font=ctk.CTkFont(size=12)).pack(side="right")
+
+    def _make_fix_chip(self, text: str, color: str) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            self._chips, text=text, command=self._fix_setup,
+            height=28, fg_color="transparent", border_width=1,
+            border_color=color, text_color=color,
+            hover_color=theme.HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+
+    def _fix_setup(self) -> None:
+        if self._on_fix_setup:
+            self._on_fix_setup()
+
+    def update_tools(self, ffmpeg_ok: bool, js_runtime) -> None:
+        """Called after the setup dialog installs/finds tools — no restart needed."""
+        self._ffmpeg_ok = ffmpeg_ok
+        self._js_runtime = js_runtime
+        self._render_chips()
+        self._apply_ffmpeg_state()
+
+    def _apply_ffmpeg_state(self) -> None:
+        running = self._is_running()
+        self._download_btn.configure(
+            state="normal" if (self._ffmpeg_ok and not running) else "disabled")
+        if not self._ffmpeg_ok:
+            self._overall_label.configure(
+                text="FFmpeg is needed before you can download — click “Fix” above.",
+                text_color=_BAD)
+        elif self._overall_label.cget("text").startswith("FFmpeg is needed"):
+            self._overall_label.configure(text="", text_color=theme.TEXT)
+
+    # ── Type / quality pickers ────────────────────────────────────────────────
+
+    def _video_label(self) -> str:
+        fmt = str(self._settings.get("default_video_format") or "mp4").upper()
+        return f"Video ({fmt})"
+
+    def _is_audio(self) -> bool:
+        return self._mode_var.get() == _AUDIO_LABEL
+
+    def _refresh_type_menu(self) -> None:
+        was_audio = self._mode_var.get() == _AUDIO_LABEL
+        self._type_menu.configure(values=[self._video_label(), _AUDIO_LABEL])
+        if self._mode_var.get():
+            self._mode_var.set(_AUDIO_LABEL if was_audio else self._video_label())
+
+    def _set_type_from_settings(self) -> None:
+        audio = self._settings.get("default_mode") == _AUDIO_LABEL
+        self._mode_var.set(_AUDIO_LABEL if audio else self._video_label())
+        self._refresh_quality_menu()
+
+    def _refresh_quality_menu(self) -> None:
+        if self._is_audio():
+            values = _AUDIO_QUALITIES
+            current = f"{self._settings.get('audio_quality')} kbps"
+        else:
+            values = _VIDEO_QUALITIES
+            current = str(self._settings.get("video_quality") or "1080p")
+        if current not in values:
+            current = values[1]
+        self._quality_menu.configure(values=values)
+        self._quality_var.set(current)
+        self._quality_hint.configure(text=_QUALITY_HINTS.get(current, ""))
+
+    def _on_type_changed(self) -> None:
+        self._settings.set("default_mode", _AUDIO_LABEL if self._is_audio() else "Video")
+        self._refresh_quality_menu()
+
+    def _on_quality_changed(self) -> None:
+        value = self._quality_var.get()
+        if self._is_audio():
+            self._settings.set("audio_quality", value.split()[0])
+        else:
+            self._settings.set("video_quality", value)
+        self._quality_hint.configure(text=_QUALITY_HINTS.get(value, ""))
+
+    def _save_output_dir(self) -> None:
+        value = self._outdir_var.get().strip()
+        if value and value != self._settings.get("output_dir"):
+            self._settings.set("output_dir", value)
+
+    def _browse_folder(self) -> None:
+        import tkinter.filedialog as fd
+        folder = fd.askdirectory(title="Choose where to save downloads")
+        if folder:
+            self._outdir_var.set(folder)
 
     # ── URL validation ────────────────────────────────────────────────────────
 
@@ -306,137 +349,60 @@ class DownloaderTab(ctk.CTkFrame):
         raw = self._url_box.get("1.0", "end").strip()
         if not raw:
             self._validation_label.configure(text="")
-            self._thumb_label.configure(image=None, text="Thumbnail\npreview")
             return
-
         valid, invalid = validate_urls(raw)
         parts: list[str] = []
         if valid:
-            parts.append(f"✅ {len(valid)} valid URL(s)")
+            parts.append(f"✓ {len(valid)} link(s) ready to add")
         if invalid:
-            parts.append(f"❌ {len(invalid)} invalid")
-            for r in invalid[:3]:
-                parts.append(f"   · {r.url[:60]}  ({r.reason})")
-        self._validation_label.configure(text="\n".join(parts))
+            parts.append(f"✗ {len(invalid)} line(s) aren't web links and will be skipped")
+        self._validation_label.configure(
+            text="   ".join(parts), text_color=_BAD if invalid and not valid else theme.MUTED)
 
-        if valid:
-            first_url = valid[0].url
-            if "youtube" in first_url or "youtu.be" in first_url:
-                fetch_thumbnail_async(
-                    first_url,
-                    on_done=lambda img: self.after(0, self._apply_thumbnail, img),
-                )
+    # ── Adding items ──────────────────────────────────────────────────────────
 
-    def _apply_thumbnail(self, img) -> None:
-        if img:
-            self._thumb_label.configure(image=img, text="")
-        else:
-            self._thumb_label.configure(image=None, text="No preview")
-
-    # ── Actions ───────────────────────────────────────────────────────────────
-
-    def _browse_folder(self) -> None:
-        import tkinter.filedialog as fd
-        folder = fd.askdirectory(title="Select output folder")
-        if folder:
-            self._outdir_var.set(folder)
-
-    def _start_download(self) -> None:
+    def _add_from_box(self) -> int:
+        """Move valid links from the text box into the list. Returns how many."""
         raw = self._url_box.get("1.0", "end").strip()
-        valid_results, invalid_results = validate_urls(raw)
+        if not raw:
+            return 0
+        valid, invalid = validate_urls(raw)
+        for r in invalid:
+            self._log_ui(f"⚠ Skipped (not a web link): {r.url}")
+        added = 0
+        for r in valid:
+            request = self._build_request(r.url)
+            if request is None:
+                self._log_ui(f"⏭ Skipped (no format chosen): {r.url}")
+                continue
+            item = self._queue.add(request)
+            self._fetch_preview(item)
+            added += 1
+        # keep only the lines that weren't added (invalid ones) so the user can fix them
+        self._url_box.delete("1.0", "end")
+        if invalid:
+            self._url_box.insert("1.0", "\n".join(r.url for r in invalid))
+        self._validate_urls_live()
+        self._sync_list()
+        return added
 
-        for r in invalid_results:
-            self._log_ui(f"⚠ Skipping invalid URL: {r.url}  ({r.reason})")
-
-        if not valid_results:
-            self._log_ui("⚠ No valid URLs to download.")
-            return
-
-        urls = [r.url for r in valid_results]
-        mode = "video" if self._mode_var.get() == "Video" else "audio"
+    def _build_request(self, url: str) -> Optional[DownloadRequest]:
         output_dir = self._outdir_var.get().strip() or _DEFAULT_OUTPUT_DIR
-        ask_per_video = self._settings.get("ask_format_per_video")
-
-        requests: list[DownloadRequest] = []
-
-        if mode == "video":
-            default_fmt = self._settings.get("default_video_format")
-            for url in urls:
-                if ask_per_video:
-                    fmt = self._ask_format(url)
-                    if fmt is None:
-                        self._log_ui(f"⏭ Skipped (no format chosen): {url}")
-                        continue
-                else:
-                    fmt = default_fmt
-                requests.append(self._make_request(url, "video", fmt, output_dir))
-        else:
-            for url in urls:
-                requests.append(self._make_request(url, "audio", "mp3", output_dir))
-
-        if not requests:
-            self._log_ui("No downloads queued.")
-            return
-
-        self._run_requests(requests)
-
-    def retry_failed(self, items: list[dict]) -> None:
-        """Re-run the queue items that failed (called from the Batch Queue tab)."""
-        if self._is_downloading or self._is_converting:
-            self._log_ui("⚠ Wait for the current batch to finish before retrying.")
-            return
-        requests = [i["request"] for i in items if i.get("request")]
-        if not requests:
-            return
-        self._log_ui(f"↺ Retrying {len(requests)} failed download(s)…")
-        self._run_requests(requests)
-
-    def _run_requests(self, requests: list[DownloadRequest]) -> None:
-        """Populate the queue and start a DownloadWorker for *requests*."""
-        self._queue_items = [
-            {
-                "url": r.url,
-                "mode": r.mode,
-                "fmt": r.video_format if r.mode == "video" else "mp3",
-                "status": "Pending",
-                "request": r,
-            }
-            for r in requests
-        ]
-        self._completed_results = []
-        if self._on_queue_update:
-            self._on_queue_update(self._queue_items)
-
-        self._set_downloading(True)
-
-        # Log runtime status so user can see what's being used
-        js_ok = self._js_runtime and self._js_runtime.available
-        if js_ok:
-            self._log_ui(
-                f"▶ Starting {len(requests)} download(s)…  "
-                f"[JS: {self._js_runtime.name} v{self._js_runtime.version}]"
-            )
-        else:
-            self._log_ui(
-                f"▶ Starting {len(requests)} download(s)…  "
-                f"[⚠ No JS runtime — install Node.js if downloads fail]"
-            )
-
-        self._worker = DownloadWorker(
-            requests=requests,
-            on_progress=self._thread_safe_progress,
-            on_item_start=self._thread_safe_item_start,
-            on_item_done=self._thread_safe_item_done,
-            on_log=self._thread_safe_log,
-            on_all_done=self._thread_safe_all_done,
-        )
-        self._worker.start()
+        if self._is_audio():
+            return self._make_request(url, "audio", "mp3", output_dir)
+        fmt = self._settings.get("default_video_format")
+        if self._settings.get("ask_format_per_video"):
+            fmt = self._ask_format(url)
+            if fmt is None:
+                return None
+        return self._make_request(url, "video", fmt, output_dir)
 
     def _make_request(self, url: str, mode: str, fmt: str, output_dir: str) -> DownloadRequest:
         return DownloadRequest(
             url=url,
             mode=mode,
             video_format=fmt,
+            video_quality=str(self._settings.get("video_quality") or "best").lower(),
             output_dir=output_dir,
             audio_quality=self._settings.get("audio_quality"),
             max_retries=int(self._settings.get("max_retries")),
@@ -448,234 +414,354 @@ class DownloaderTab(ctk.CTkFrame):
             skip_existing=bool(self._settings.get("skip_existing")),
             proxy_url=self._settings.get("proxy_url"),
             ffmpeg_location=self._settings.get("_ffmpeg_location") or "",
-            # JS runtime — critical for YouTube extraction
             js_runtime_name=self._settings.get("_js_runtime_name") or "",
             js_runtime_path=self._settings.get("_js_runtime_path") or "",
         )
-
-    def _cancel_download(self) -> None:
-        if self._worker:
-            self._worker.stop()
-            self._log_ui("⏹ Cancellation requested…")
-        if self._conv_worker:
-            self._conv_worker.stop()
 
     def _ask_format(self, url: str) -> Optional[str]:
         dlg = FormatDialog(self.winfo_toplevel(), url)
         self.wait_window(dlg)
         return dlg.chosen_format
 
+    def _fetch_preview(self, item: QueueItem) -> None:
+        def done(title: str, pil_image) -> None:
+            self.after(0, self._apply_preview, item.id, title, pil_image)
+        fetch_preview_async(item.request.url, done)
+
+    def _apply_preview(self, item_id: int, title: str, pil_image) -> None:
+        item = self._queue.get(item_id)
+        if not item:
+            return
+        if title and not item.title:
+            item.title = title
+        image = to_ctk_image(pil_image)
+        if image is not None:
+            self._list.set_thumbnail(item_id, image)
+        self._list.update_item(item)
+
+    # ── Start / stop ──────────────────────────────────────────────────────────
+
+    def _is_running(self) -> bool:
+        return bool(self._worker and self._worker.is_alive())
+
+    def _start_download(self) -> None:
+        if not self._ffmpeg_ok:
+            self._fix_setup()
+            return
+        self._add_from_box()
+        if not self._queue.has_work():
+            self._overall_label.configure(
+                text="Paste a link above first." if not self._queue.items()
+                else "Nothing waiting — everything in the list is finished.",
+                text_color=_WARN)
+            return
+        self._ensure_worker()
+
+    def _ensure_worker(self) -> None:
+        if self._is_running() or not self._queue.has_work() or not self._ffmpeg_ok:
+            return
+        self._hide_banner()
+        self._user_stopped = False
+        self._run_ids = set()
+        js_ok = self._js_runtime and self._js_runtime.available
+        self._log_ui(
+            f"▶ Starting {self._queue.stats()[READY]} download(s)… "
+            + (f"[JS: {self._js_runtime.name} {self._js_runtime.version}]" if js_ok
+               else "[⚠ Setup incomplete: no JavaScript runtime — some videos may fail]")
+        )
+        self._worker = QueueWorker(
+            self._queue,
+            on_item_start=lambda item: self.after(0, self._apply_item_start, item),
+            on_progress=lambda item, data: self.after(0, self._apply_progress, item, data),
+            on_item_done=lambda item, res: self.after(0, self._apply_item_done, item, res),
+            on_log=lambda msg: self.after(0, self._log_ui, msg),
+            on_all_done=lambda stopped: self.after(0, self._apply_all_done, stopped),
+        )
+        self._set_running(True)
+        self._worker.start()
+
+    def _cancel_download(self) -> None:
+        if self._worker:
+            self._user_stopped = True
+            self._worker.stop()
+            self._log_ui("■ Stopping…")
+            self._overall_label.configure(text="Stopping…", text_color=_WARN)
+
+    def _set_running(self, running: bool) -> None:
+        self._cancel_btn.configure(state="normal" if running else "disabled")
+        self._apply_ffmpeg_state()
+
+    # ── Row actions ───────────────────────────────────────────────────────────
+
+    def _on_row_action(self, action: str, item_id: int) -> None:
+        item = self._queue.get(item_id)
+        if not item:
+            return
+        if action == "remove":
+            self._queue.remove(item_id)
+        elif action == "cancel":
+            self._queue.cancel(item_id)
+        elif action == "retry":
+            if self._queue.retry(item_id):
+                self._ensure_worker()
+        elif action == "play" and item.filepaths:
+            _open_path(item.filepaths[0])
+        elif action == "open":
+            _reveal_in_folder(item.filepaths[0] if item.filepaths else item.request.output_dir)
+        elif action == "details":
+            self._show_error_details(item)
+        self._sync_list()
+
+    def _retry_all_failed(self) -> None:
+        if self._queue.retry_failed():
+            self._sync_list()
+            self._ensure_worker()
+
+    def _clear_finished(self) -> None:
+        self._queue.clear_finished()
+        self._hide_banner()
+        self._sync_list()
+
+    def _show_error_details(self, item: QueueItem) -> None:
+        dlg = ctk.CTkToplevel(self.winfo_toplevel())
+        dlg.title("What went wrong")
+        dlg.geometry("560x340")
+        dlg.transient(self.winfo_toplevel())
+        ctk.CTkLabel(dlg, text=item.error or "The download failed.", anchor="w",
+                     font=ctk.CTkFont(size=15, weight="bold"),
+                     wraplength=510, justify="left").pack(fill="x", padx=20, pady=(18, 2))
+        ctk.CTkLabel(dlg, text=item.hint, anchor="w", text_color=theme.MUTED, wraplength=510,
+                     justify="left", font=ctk.CTkFont(size=13)).pack(fill="x", padx=20)
+        ctk.CTkLabel(dlg, text="Technical details:", anchor="w",
+                     font=ctk.CTkFont(size=12)).pack(fill="x", padx=20, pady=(12, 2))
+        box = ctk.CTkTextbox(dlg, font=ctk.CTkFont(family="Consolas", size=12))
+        box.insert("1.0", f"{item.request.url}\n\n{item.error_detail}")
+        box.configure(state="disabled")
+        box.pack(fill="both", expand=True, padx=20)
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=12)
+
+        def copy() -> None:
+            dlg.clipboard_clear()
+            dlg.clipboard_append(f"{item.request.url}\n{item.error_detail}")
+        ctk.CTkButton(row, text="Copy details", width=110, fg_color="transparent", text_color=theme.TEXT,
+                      border_width=1, command=copy).pack(side="left")
+        ctk.CTkButton(row, text="Close", width=90, command=dlg.destroy).pack(side="right")
+        dlg.bind("<Escape>", lambda _: dlg.destroy())
+        dlg.after(50, dlg.lift)
+        dlg.after(80, dlg.focus_force)
+
+    # ── Worker callbacks (main thread) ────────────────────────────────────────
+
+    def _apply_item_start(self, item: QueueItem) -> None:
+        self._run_ids.add(item.id)
+        self._sync_list()
+
+    def _apply_progress(self, item: QueueItem, data: ProgressData) -> None:
+        self._list.update_item(item)
+        self._refresh_overall()
+
+    def _apply_item_done(self, item: QueueItem, result: DownloadResult) -> None:
+        if result.success:
+            self._log_ui(f"✓ Done: {item.display_title}")
+        elif result.cancelled:
+            self._log_ui(f"■ Stopped: {item.display_title}")
+        else:
+            self._log_ui(f"✗ Failed: {item.request.url}\n   {result.error_message}")
+        if not result.cancelled:
+            r = item.request
+            self._history.add_entry(
+                title=item.display_title,
+                url=r.url,
+                fmt=(f"{r.video_format} {r.video_quality}" if r.mode == "video"
+                     else f"mp3 {r.audio_quality}k"),
+                status="success" if result.success else "failed",
+                filepath=result.filepath,
+            )
+        self._sync_list()
+
+    def _apply_all_done(self, stopped: bool) -> None:
+        self._set_running(False)
+        if not stopped and self._queue.has_work():
+            # links were added while the last item was finishing
+            self._ensure_worker()
+            return
+        self._sync_list()
+        items = [i for i in self._queue.items() if i.id in self._run_ids]
+        done = [i for i in items if i.status == COMPLETED]
+        failed = [i for i in items if i.status == FAILED]
+        waiting = self._queue.stats()[READY]
+        if stopped:
+            msg = "Stopped." + (f" {waiting} still waiting — click Start to continue."
+                                if waiting else "")
+            self._overall_label.configure(text=msg, text_color=_WARN)
+            self._log_ui("■ Stopped by user.")
+            return
+        self._log_ui(f"━━ Finished: {len(done)} downloaded, {len(failed)} failed ━━")
+        self._show_banner(done, failed)
+        self._notify_finished()
+        if self._settings.get("auto_open_folder") and done:
+            self._open_output_folder()
+
+    # ── Overall progress + banner ─────────────────────────────────────────────
+
+    def _sync_list(self) -> None:
+        self._list.sync(self._queue.items())
+        self._refresh_overall()
+
+    def _refresh_overall(self) -> None:
+        stats = self._queue.stats()
+        failed_or_stopped = stats[FAILED] + stats[CANCELLED]
+        self._retry_all_btn.configure(state="normal" if failed_or_stopped else "disabled")
+        self._clear_btn.configure(
+            state="normal" if stats[COMPLETED] + failed_or_stopped else "disabled")
+        if not self._ffmpeg_ok:
+            return
+        items = [i for i in self._queue.items() if i.id in self._run_ids or i.status == READY]
+        if not self._is_running() or not items:
+            if not self._is_running():
+                self._overall_bar.set(0)
+            return
+        total = len(items)
+        finished = sum(1 for i in items if i.status in (COMPLETED, FAILED, CANCELLED))
+        current = next((i for i in items if i.status == DOWNLOADING), None)
+        frac = (finished + (current.percent / 100 if current else 0)) / total
+        self._overall_bar.set(frac)
+        text = f"{finished} of {total} done"
+        eta = self._estimate_remaining(items, current)
+        if eta:
+            text += f"  ·  {eta}"
+        self._overall_label.configure(text=text, text_color=theme.TEXT)
+
+    @staticmethod
+    def _estimate_remaining(items: list[QueueItem], current: Optional[QueueItem]) -> str:
+        durations = [i.finished_at - i.started_at for i in items
+                     if i.status == COMPLETED and i.finished_at > i.started_at]
+        waiting = sum(1 for i in items if i.status == READY)
+        current_left = current.eta_seconds if current and current.eta_seconds else None
+        if durations:
+            avg = sum(durations) / len(durations)
+            seconds = avg * waiting + (current_left if current_left is not None
+                                       else avg * (1 - (current.percent / 100 if current else 1)))
+        elif waiting == 0 and current_left is not None:
+            seconds = current_left
+        else:
+            return ""   # not enough information yet
+        if seconds < 60:
+            return "less than a minute left"
+        minutes = round(seconds / 60)
+        return f"about {minutes} min left" if minutes < 90 else f"about {minutes // 60} h left"
+
+    def _show_banner(self, done: list[QueueItem], failed: list[QueueItem]) -> None:
+        if failed and done:
+            text = f"✓ Finished — {len(done)} downloaded, {len(failed)} failed (see the list)."
+            color = theme.BANNER_WARN
+        elif failed:
+            text = f"✗ {len(failed)} download(s) failed — see the list for what to do."
+            color = theme.BANNER_BAD
+        else:
+            text = f"✓ All done — {len(done)} file(s) saved."
+            color = theme.BANNER_OK
+        self._banner.configure(fg_color=color)
+        self._banner_label.configure(text=text)
+        last = next((i for i in reversed(done) if i.filepaths), None)
+        if last:
+            self._banner_play.configure(command=lambda p=last.filepaths[0]: _open_path(p))
+            self._banner_play.pack(side="right", padx=4, before=self._banner_open)
+        else:
+            self._banner_play.pack_forget()
+        self._overall_bar.set(1 if done else 0)
+        self._overall_label.configure(text="", text_color=theme.TEXT)
+        self._banner.pack(fill="x", padx=24, pady=(0, 4), after=self._banner_anchor)
+
+    def _hide_banner(self) -> None:
+        self._banner.pack_forget()
+
+    def _notify_finished(self) -> None:
+        """Sound + flash the taskbar button if the window isn't in front."""
+        top = self.winfo_toplevel()
+        try:
+            top.bell()
+            if sys.platform == "win32":
+                # TIMERNOFG: flashes only while the window is in the background
+                import ctypes
+                from ctypes import wintypes
+
+                class FLASHWINFO(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                                ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                                ("dwTimeout", wintypes.DWORD)]
+                hwnd = ctypes.windll.user32.GetParent(top.winfo_id())
+                # FLASHW_ALL | FLASHW_TIMERNOFG: flash until the window is focused
+                info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3 | 0xC, 0, 0)
+                ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except Exception as exc:
+            _log.debug("Finish notification failed: %s", exc)
+
+    def _open_output_folder(self) -> None:
+        folder = self._outdir_var.get().strip() or _DEFAULT_OUTPUT_DIR
+        os.makedirs(folder, exist_ok=True)
+        _open_path(folder)
+
+    # ── Details log ───────────────────────────────────────────────────────────
+
+    def _toggle_details(self) -> None:
+        self._details_open = not self._details_open
+        if self._details_open:
+            self._details_btn.configure(text="▾ Hide details")
+            self._clear_log_btn.pack(side="right")
+            self._log_box.pack(fill="x", padx=24, pady=(0, 14))
+        else:
+            self._details_btn.configure(text="▸ Show details")
+            self._clear_log_btn.pack_forget()
+            self._log_box.pack_forget()
+
     def _clear_log(self) -> None:
         self._log_box.configure(state="normal")
         self._log_box.delete("1.0", "end")
         self._log_box.configure(state="disabled")
 
-    # ── Post-download conversion ──────────────────────────────────────────────
-
-    def _start_conversion_batch(self, completed_results: list[DownloadResult]) -> bool:
-        """Start converting the downloaded files. Returns True if a batch started."""
-        if not self._conv_enabled_var.get():
-            return False
-
-        import os
-        files = [
-            path
-            for r in completed_results if r.success
-            for path in (r.filepaths or ([r.filepath] if r.filepath else []))
-        ]
-        if not files:
-            self._log_ui("🔄 No files to convert.")
-            return False
-
-        output_format = self._conv_format_var.get()
-        bitrate = self._conv_bitrate_var.get()
-        delete_source = self._del_source_var.get()
-
-        try:
-            from conversion_worker import ConversionRequest, ConversionWorker
-        except ImportError:
-            self._log_ui("❌ conversion_worker module not found — skipping conversion.")
-            return False
-
-        ffmpeg_dir = self._settings.get("_ffmpeg_location") or ""
-        conv_requests = []
-        for path in files:
-            base, ext = os.path.splitext(path)
-            if ext.lower().lstrip(".") == output_format.lower():
-                self._log_ui(
-                    f"🔄 Skipping {os.path.basename(path)} — already {output_format.upper()}."
-                )
-                continue
-            conv_requests.append(
-                ConversionRequest(
-                    input_file=path,
-                    output_file=f"{base}.{output_format}",
-                    output_format=output_format,
-                    bitrate=bitrate,
-                    delete_source=delete_source,
-                    ffmpeg_dir=ffmpeg_dir,
-                )
-            )
-        if not conv_requests:
-            return False
-
-        self._log_ui(
-            f"🔄 Converting {len(conv_requests)} file(s) "
-            f"to {output_format.upper()} @ {bitrate}…"
-        )
-        self._status_label.configure(text="Converting…", text_color="#DCDCAA")
-        self._cancel_btn.configure(state="normal")
-        self._download_btn.configure(state="disabled")
-        self._is_converting = True
-
-        self._conv_worker = ConversionWorker(
-            requests=conv_requests,
-            on_progress=self._thread_safe_conv_progress,
-            on_item_done=self._thread_safe_conv_done,
-            on_log=self._thread_safe_log,
-            on_all_done=self._thread_safe_conv_all_done,
-        )
-        self._conv_worker.start()
-        return True
-
-    # ── Thread-safe callbacks ─────────────────────────────────────────────────
-
-    def _thread_safe_progress(self, data: ProgressData) -> None:
-        self.after(0, self._apply_progress, data)
-
-    def _thread_safe_conv_progress(self, percent: float, time_str: str) -> None:
-        self.after(0, self._apply_conv_progress, percent, time_str)
-
-    def _thread_safe_item_start(self, url: str, index: int, total: int) -> None:
-        self.after(0, self._apply_item_start, url, index, total)
-
-    def _thread_safe_item_done(self, result: DownloadResult) -> None:
-        self.after(0, self._apply_item_done, result)
-
-    def _thread_safe_conv_done(self, result) -> None:
-        self.after(0, self._apply_conv_done, result)
-
-    def _thread_safe_log(self, msg: str) -> None:
-        self.after(0, self._log_ui, msg)
-
-    def _thread_safe_all_done(self) -> None:
-        self.after(0, self._apply_all_done)
-
-    def _thread_safe_conv_all_done(self) -> None:
-        self.after(0, self._apply_conv_all_done)
-
-    # ── UI updates (main thread) ──────────────────────────────────────────────
-
-    def _apply_progress(self, data: ProgressData) -> None:
-        self._progress_bar.set(data.percent / 100.0)
-        self._pct_label.configure(text=f"{data.percent:.0f}%")
-        self._speed_label.configure(text=f"Speed: {data.speed}")
-        self._eta_label.configure(text=f"ETA: {data.eta}")
-        if data.status == "finished":
-            self._status_label.configure(text="Processing…", text_color="#DCDCAA")
-        else:
-            self._status_label.configure(text="Downloading", text_color="#4EC9B0")
-
-    def _apply_conv_progress(self, percent: float, time_str: str) -> None:
-        self._progress_bar.set(percent / 100.0)
-        self._pct_label.configure(text=f"{percent:.0f}%")
-        self._speed_label.configure(text=f"Time: {time_str}")
-        self._status_label.configure(text="Converting…", text_color="#DCDCAA")
-
-    def _apply_item_start(self, url: str, index: int, total: int) -> None:
-        short = url if len(url) <= 55 else url[:52] + "…"
-        self._current_item_label.configure(text=f"[{index}/{total}] {short}")
-        if 0 < index <= len(self._queue_items):
-            self._queue_items[index - 1]["status"] = "Downloading"
-        if self._on_queue_update:
-            self._on_queue_update(self._queue_items)
-
-    def _apply_item_done(self, result: DownloadResult) -> None:
-        if result.success:
-            self._log_ui(f"✅ Done: {result.title}")
-            if self._settings.get("auto_open_folder") and result.filepath:
-                self._open_folder(result.filepath)
-        else:
-            self._log_ui(f"❌ Failed: {result.url}\n   {result.error_message}")
-
-        fmt_label = "mp3"
-        if 0 < result.index <= len(self._queue_items):
-            item = self._queue_items[result.index - 1]
-            fmt_label = item["fmt"]
-            item["status"] = "Completed" if result.success else "Failed"
-        self._completed_results.append(result)
-
-        self._history.add_entry(
-            title=result.title,
-            url=result.url,
-            fmt=fmt_label,
-            status="success" if result.success else "failed",
-            filepath=result.filepath,
-        )
-        if self._on_queue_update:
-            self._on_queue_update(self._queue_items)
-
-    def _apply_conv_done(self, result) -> None:
-        import os
-        name = os.path.basename(result.request.output_file)
-        if result.success:
-            self._log_ui(f"🔄 Converted: {name}")
-        else:
-            self._log_ui(f"❌ Conversion failed: {name}\n   {result.error_message}")
-
-    def _apply_all_done(self) -> None:
-        self._set_downloading(False)
-        self._log_ui("🏁 All downloads finished.")
-        self._status_label.configure(text="Done", text_color="#4CAF50")
-        self._current_item_label.configure(text="")
-
-        # Convert straight from this batch's results (not via history lookups,
-        # which mismatch when the same URL is downloaded more than once).
-        if self._conv_enabled_var.get() and not (self._worker and self._worker.is_cancelled):
-            self._start_conversion_batch(self._completed_results)
-
-    def _apply_conv_all_done(self) -> None:
-        self._is_converting = False
-        self._set_downloading(False)
-        self._cancel_btn.configure(state="disabled")
-        self._log_ui("🔄 All conversions finished.")
-        self._status_label.configure(text="Done", text_color="#4CAF50")
-
-    def _set_downloading(self, state: bool) -> None:
-        self._is_downloading = state
-        self._download_btn.configure(
-            state="disabled" if state else ("normal" if self._ffmpeg_ok else "disabled")
-        )
-        self._cancel_btn.configure(state="normal" if state else "disabled")
-        if not state:
-            self._progress_bar.set(0)
-            self._pct_label.configure(text="0%")
-            self._speed_label.configure(text="Speed: —")
-            self._eta_label.configure(text="ETA: —")
-
     def _log_ui(self, msg: str) -> None:
         self._log_box.configure(state="normal")
         self._log_box.insert("end", msg + "\n")
+        # keep the log from growing forever
+        lines = int(self._log_box.index("end-1c").split(".")[0])
+        if lines > 2000:
+            self._log_box.delete("1.0", f"{lines - 2000}.0")
         self._log_box.see("end")
         self._log_box.configure(state="disabled")
         _log.info(msg)
 
-    def on_settings_changed(self, key: str, value) -> None:
-        if key == "output_dir":
-            self._outdir_var.set(str(value))
-        elif key == "default_mode":
-            self._mode_var.set(str(value))
+    # ── Settings sync ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _open_folder(filepath: str) -> None:
-        import os, sys, subprocess
-        folder = os.path.dirname(os.path.abspath(filepath))
-        try:
-            if sys.platform == "win32":
-                os.startfile(folder)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", folder])
-            else:
-                subprocess.Popen(["xdg-open", folder])
-        except Exception as exc:
-            _log.error("Could not open folder: %s", exc)
+    def on_settings_changed(self, key: str, value) -> None:
+        if key in ("output_dir", "__reset__"):
+            if self._outdir_var.get() != self._settings.get("output_dir"):
+                self._outdir_var.set(str(self._settings.get("output_dir")))
+        if key in ("default_video_format", "__reset__"):
+            self._refresh_type_menu()
+        if key in ("default_mode", "video_quality", "audio_quality", "__reset__"):
+            self._set_type_from_settings()
+
+
+# ── Shell helpers ─────────────────────────────────────────────────────────────
+
+def _open_path(path: str) -> None:
+    """Open a file with its default app (play) or a folder in the file manager."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # noqa: S606 - local file chosen by the app
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as exc:
+        _log.error("Could not open %s: %s", path, exc)
+
+
+def _reveal_in_folder(path: str) -> None:
+    """Open the containing folder with the file selected, where supported."""
+    if sys.platform == "win32" and os.path.isfile(path):
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    else:
+        _open_path(path if os.path.isdir(path) else os.path.dirname(path))

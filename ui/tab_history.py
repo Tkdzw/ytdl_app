@@ -13,14 +13,17 @@ from typing import Any
 
 import customtkinter as ctk
 
+from ui import theme
+from ui.tooltip import add_tooltip
+
 from utils.history_manager import HistoryManager
 from utils.logger import AppLogger
 
 _log = AppLogger.get_logger(__name__)
 
 _STATUS_COLORS = {
-    "success": "#4CAF50",
-    "failed":  "#FF6B6B",
+    "success": theme.OK,
+    "failed":  theme.BAD,
 }
 
 _STATUS_FILTER_OPTIONS = ["All", "Success", "Failed"]
@@ -55,20 +58,23 @@ class HistoryTab(ctk.CTkFrame):
         ).pack(side="left")
 
         for text, cmd, color in [
-            ("🗑 Clear All", self._clear_history, "#7F1A1A"),
+            ("🗑 Clear All", self._clear_history, "danger"),
             ("⬇ Export CSV",  self._export_csv,   "transparent"),
             ("🔄 Refresh",     self.refresh,        "transparent"),
         ]:
+            danger = color == "danger"
             ctk.CTkButton(
-                header, text=text, width=110, height=32,
-                fg_color=color,
-                hover_color="#5C1414" if color == "#7F1A1A" else ("gray80", "#333"),
-                border_width=0 if color != "transparent" else 1,
+                header, text=text, width=120, height=32,
+                fg_color=theme.STOP_BTN if danger else "transparent",
+                hover_color=theme.STOP_HOVER if danger else theme.HOVER,
+                text_color="white" if danger else theme.TEXT,
+                border_width=0 if danger else 1,
+                font=theme.font(13),
                 command=cmd,
             ).pack(side="right", padx=4)
 
         # ── Stats bar ─────────────────────────────────────────────────────────
-        self._stats_frame = ctk.CTkFrame(self, fg_color=("#ECECEC", "#1E1E1E"), corner_radius=8)
+        self._stats_frame = ctk.CTkFrame(self, fg_color=theme.PANEL_BG, corner_radius=8)
         self._stats_frame.pack(fill="x", padx=24, pady=(0, 12))
         self._stat_labels: dict[str, ctk.CTkLabel] = {}
 
@@ -77,12 +83,12 @@ class HistoryTab(ctk.CTkFrame):
             cell.pack(side="left", padx=20, pady=10)
             val_lbl = ctk.CTkLabel(cell, text="0", font=ctk.CTkFont(size=20, weight="bold"))
             val_lbl.pack()
-            colors = {"total": None, "succeeded": "#4CAF50", "failed": "#FF6B6B"}
+            colors = {"total": None, "succeeded": theme.OK, "failed": theme.BAD}
             if colors[key]:
                 val_lbl.configure(text_color=colors[key])
             ctk.CTkLabel(
                 cell, text=key.capitalize(),
-                font=ctk.CTkFont(size=11), text_color="gray",
+                font=ctk.CTkFont(size=12), text_color=theme.MUTED,
             ).pack()
             self._stat_labels[key] = val_lbl
 
@@ -111,7 +117,7 @@ class HistoryTab(ctk.CTkFrame):
         ).pack(side="left", padx=8)
 
         # ── Column headers ────────────────────────────────────────────────────
-        col_header = ctk.CTkFrame(self, fg_color="#1C1C1C", corner_radius=6)
+        col_header = ctk.CTkFrame(self, fg_color=theme.HEADER_BG, corner_radius=6)
         col_header.pack(fill="x", padx=24, pady=(0, 4))
 
         for col, width, expand in [
@@ -139,7 +145,7 @@ class HistoryTab(ctk.CTkFrame):
             self._scroll,
             text="No download history yet.",
             font=ctk.CTkFont(size=13),
-            text_color="gray",
+            text_color=theme.MUTED,
         )
         self._empty_label.pack(pady=40)
 
@@ -203,12 +209,12 @@ class HistoryTab(ctk.CTkFrame):
 
     def _make_row(self, record: dict) -> ctk.CTkFrame:
         status       = record.get("status", "")
-        status_color = _STATUS_COLORS.get(status, "gray")
+        status_color = _STATUS_COLORS.get(status, theme.MUTED)
         filepath     = record.get("filepath", "")
 
         row = ctk.CTkFrame(
             self._scroll,
-            fg_color=("#F5F5F5", "#2A2A2A"),
+            fg_color=theme.ROW_BG,
             corner_radius=4,
         )
 
@@ -229,33 +235,51 @@ class HistoryTab(ctk.CTkFrame):
         # Date
         ctk.CTkLabel(
             row, text=record.get("date", "—"),
-            width=160, font=ctk.CTkFont(size=11),
-            text_color="gray", anchor="w",
+            width=160, font=ctk.CTkFont(size=12),
+            text_color=theme.MUTED, anchor="w",
         ).pack(side="left", padx=4)
 
         # Status badge
+        # status in words + symbol, not colour alone
         ctk.CTkLabel(
-            row, text=status.capitalize(),
+            row, text={"success": "✓ Done", "failed": "✗ Failed"}.get(status, status.capitalize()),
             width=80, font=ctk.CTkFont(size=12, weight="bold"),
             text_color=status_color, anchor="w",
         ).pack(side="left", padx=4)
 
         # Open-folder button
         folder_exists = filepath and os.path.exists(os.path.dirname(os.path.abspath(filepath)))
-        ctk.CTkButton(
+        folder_btn = ctk.CTkButton(
             row, text="📂", width=36, height=28,
             font=ctk.CTkFont(size=13),
-            fg_color="transparent",
-            hover_color=("#DDD", "#333"),
+            fg_color="transparent", text_color=theme.TEXT,
+            hover_color=theme.HOVER,
             state="normal" if folder_exists else "disabled",
             command=lambda p=filepath: self._open_folder(p),
-        ).pack(side="left", padx=(0, 6))
+        )
+        folder_btn.pack(side="left", padx=(0, 6))
+        add_tooltip(folder_btn, "Open the folder this file was saved in"
+                    if folder_exists else "The folder no longer exists")
 
         return row
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
     def _clear_history(self) -> None:
+        # Destructive and can't be undone, so ask first. (Downloaded files
+        # are not touched — only this list.)
+        from tkinter import messagebox
+        count = len(self._all_records)
+        if not count:
+            return
+        if not messagebox.askyesno(
+            "Clear history?",
+            f"Remove all {count} entries from your download history?\n\n"
+            "Your downloaded files are NOT deleted — only this list. "
+            "This can't be undone.",
+            icon="warning", default="no", parent=self.winfo_toplevel(),
+        ):
+            return
         self._history.clear()
         self.refresh()
         _log.info("History cleared by user.")

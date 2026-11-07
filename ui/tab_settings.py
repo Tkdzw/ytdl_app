@@ -1,5 +1,9 @@
 """
-UI Tab: Settings — all user-configurable preferences with live persistence.
+UI Tab: Settings — user preferences with live persistence.
+
+Everyday options are shown first ("Saving", "Downloads", "Appearance").
+Technical ones (retries, speed limit, proxy, tool locations) live in a
+collapsed "Advanced" section. Every option has a hover/focus tooltip.
 """
 from __future__ import annotations
 
@@ -9,15 +13,19 @@ from typing import Any
 
 import customtkinter as ctk
 
-from utils.settings_manager import SettingsManager
+from ui import theme
+from ui.tooltip import add_tooltip
 from utils.logger import AppLogger
+from utils.settings_manager import SettingsManager
 
 _log = AppLogger.get_logger(__name__)
+
+_LABEL_WIDTH = 230
 
 
 class SettingsTab(ctk.CTkFrame):
     """
-    Full settings panel. Every widget change persists immediately via
+    Settings panel. Every widget change persists immediately via
     SettingsManager. A callback notifies other tabs when key settings change.
     """
 
@@ -32,372 +40,279 @@ class SettingsTab(ctk.CTkFrame):
         self._settings = settings
         self._on_changed = on_settings_changed
         self._vars: dict[str, ctk.Variable] = {}
+        self._advanced_open = False
         self._build()
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        ctk.CTkLabel(
-            self,
-            text="⚙️  Settings",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(anchor="w", padx=24, pady=(20, 4))
-
-        ctk.CTkLabel(
-            self,
-            text="All changes are saved automatically.",
-            font=ctk.CTkFont(size=12),
-            text_color="gray",
-        ).pack(anchor="w", padx=24, pady=(0, 16))
+        ctk.CTkLabel(self, text="⚙️  Settings",
+                     font=theme.font(22, "bold")).pack(anchor="w", padx=24, pady=(20, 2))
+        ctk.CTkLabel(self, text="Changes are saved automatically. Hover over an option to see what it does.",
+                     font=theme.font(13), text_color=theme.MUTED,
+                     ).pack(anchor="w", padx=24, pady=(0, 12))
 
         scroll = ctk.CTkScrollableFrame(self, label_text="")
-        scroll.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+        scroll.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+        self._scroll = scroll
 
-        self._build_section(scroll, "📁  Output")
-        self._build_output_section(scroll)
+        self._section(scroll, "📁  Saving")
+        self._build_saving_section(scroll)
 
-        self._build_section(scroll, "🎬  Download Defaults")
+        self._section(scroll, "🎬  Downloads")
         self._build_download_section(scroll)
 
-        self._build_section(scroll, "⚡  Performance")
-        self._build_performance_section(scroll)
-
-        self._build_section(scroll, "🌐  Network")
-        self._build_network_section(scroll)
-
-        self._build_section(scroll, "🔧  Tools")
-        self._build_tools_section(scroll)
-
-        self._build_section(scroll, "🎨  Appearance")
+        self._section(scroll, "🎨  Appearance")
         self._build_appearance_section(scroll)
 
-        ctk.CTkButton(
-            self,
-            text="↺  Reset All to Defaults",
-            width=200,
-            height=36,
-            fg_color="transparent",
-            border_width=1,
-            text_color=("gray30", "gray70"),
-            command=self._reset_defaults,
-        ).pack(pady=(0, 16))
+        # ── Advanced (collapsed) ──────────────────────────────────────────────
+        self._adv_toggle = ctk.CTkButton(
+            scroll, text="▸  Advanced settings", anchor="w", height=34,
+            font=theme.font(14, "bold"), fg_color="transparent",
+            text_color=theme.TEXT, hover_color=theme.HOVER,
+            command=self._toggle_advanced,
+        )
+        self._adv_toggle.pack(fill="x", padx=0, pady=(18, 0))
+        add_tooltip(self._adv_toggle,
+                    "Retries, speed limit, proxy and helper-tool locations. "
+                    "Most people never need to change these.")
+        self._adv_frame = ctk.CTkFrame(scroll, fg_color="transparent")
+        self._section(self._adv_frame, "⚡  Reliability & speed")
+        self._build_performance_section(self._adv_frame)
+        self._section(self._adv_frame, "🌐  Network")
+        self._build_network_section(self._adv_frame)
+        self._section(self._adv_frame, "🔧  Helper tools")
+        self._build_tools_section(self._adv_frame)
 
-    # ── Section label ─────────────────────────────────────────────────────────
+        reset = ctk.CTkButton(
+            self, text="↺  Reset all to defaults", width=200, height=36,
+            fg_color="transparent", border_width=1, text_color=theme.MUTED,
+            command=self._reset_defaults,
+        )
+        reset.pack(pady=(0, 16))
+        add_tooltip(reset, "Puts every setting back to how it was when the app was installed.")
+
+    def _toggle_advanced(self) -> None:
+        self._advanced_open = not self._advanced_open
+        if self._advanced_open:
+            self._adv_toggle.configure(text="▾  Advanced settings")
+            self._adv_frame.pack(fill="x", after=self._adv_toggle)
+        else:
+            self._adv_toggle.configure(text="▸  Advanced settings")
+            self._adv_frame.pack_forget()
 
     @staticmethod
-    def _build_section(parent: ctk.CTkFrame, title: str) -> None:
-        ctk.CTkLabel(
-            parent,
-            text=title,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w",
-        ).pack(fill="x", padx=4, pady=(16, 4))
-        ctk.CTkFrame(parent, height=1, fg_color="#333").pack(fill="x", padx=4, pady=(0, 8))
+    def _section(parent: ctk.CTkFrame, title: str) -> None:
+        ctk.CTkLabel(parent, text=title, font=theme.font(14, "bold"),
+                     anchor="w").pack(fill="x", padx=4, pady=(16, 4))
+        theme.divider(parent, padx=4, pady=(0, 8))
 
-    # ── Output section ────────────────────────────────────────────────────────
+    # ── Saving ────────────────────────────────────────────────────────────────
 
-    def _build_output_section(self, parent: ctk.CTkFrame) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(row, text="Default output folder:", width=200, anchor="w").pack(side="left")
-
+    def _build_saving_section(self, parent: ctk.CTkFrame) -> None:
+        row = self._make_row(parent, "Save downloads to:",
+                             "The folder new downloads go into. You can also change it on the home screen.")
         var = ctk.StringVar(value=self._settings.get("output_dir"))
         self._vars["output_dir"] = var
-        ctk.CTkEntry(row, textvariable=var, width=260,
-                     font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            row, text="Browse", width=70,
-            command=lambda: self._browse_folder(var),
-        ).pack(side="left")
+        ctk.CTkEntry(row, textvariable=var, width=300,
+                     font=theme.font(12)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(row, text="Browse", width=70,
+                      command=lambda: self._browse_folder(var)).pack(side="left")
         var.trace_add("write", lambda *_: self._save("output_dir", var.get()))
 
-        self._row_checkbox(parent, "auto_open_folder", "Auto-open output folder when done")
-        self._row_checkbox(parent, "skip_existing",    "Skip if file already exists")
+        self._row_checkbox(parent, "auto_open_folder", "Open the folder when downloads finish",
+                           "Shows the saved files in File Explorer as soon as a batch is done.")
+        self._row_checkbox(parent, "skip_existing", "Skip videos I've already downloaded",
+                           "If a file with the same name is already in the folder, it isn't downloaded again.")
 
-    # ── Download defaults ─────────────────────────────────────────────────────
+    # ── Downloads ─────────────────────────────────────────────────────────────
 
     def _build_download_section(self, parent: ctk.CTkFrame) -> None:
-        # Default mode
-        row = self._make_row(parent, "Default mode:")
-        var = ctk.StringVar(value=self._settings.get("default_mode"))
-        self._vars["default_mode"] = var
-        ctk.CTkSegmentedButton(
-            row, values=["Video", "Audio (MP3)"], variable=var, width=200,
-        ).pack(side="left")
-        var.trace_add("write", lambda *_: self._save("default_mode", var.get()))
-
-        # Default video format
-        row2 = self._make_row(parent, "Default video format:")
-        var2 = ctk.StringVar(value=self._settings.get("default_video_format"))
-        self._vars["default_video_format"] = var2
-        ctk.CTkSegmentedButton(
-            row2, values=["mp4", "mkv", "webm"], variable=var2, width=200,
-        ).pack(side="left")
-        var2.trace_add("write", lambda *_: self._save("default_video_format", var2.get()))
-
-        # Audio quality
-        row3 = self._make_row(parent, "MP3 audio quality:")
-        var3 = ctk.StringVar(value=self._settings.get("audio_quality"))
-        self._vars["audio_quality"] = var3
-        ctk.CTkSegmentedButton(
-            row3, values=["128", "192", "256", "320"], variable=var3, width=240,
-        ).pack(side="left")
-        ctk.CTkLabel(row3, text="kbps", text_color="gray",
-                     font=ctk.CTkFont(size=11)).pack(side="left", padx=6)
-        var3.trace_add("write", lambda *_: self._save("audio_quality", var3.get()))
-
-        self._row_checkbox(parent, "ask_format_per_video",
-                           "Ask format for each video individually")
-        self._row_checkbox(parent, "embed_thumbnail",  "Embed thumbnail into file")
-        self._row_checkbox(parent, "write_subtitles",  "Download subtitles (auto-generated)")
-
-        # Subtitle language
-        row4 = self._make_row(parent, "Subtitle language code:")
+        self._segmented(parent, "default_mode", "Download by default:",
+                        ["Video", "Audio (MP3)"],
+                        "What the home screen starts with. You can switch it there any time.")
+        self._segmented(parent, "video_quality", "Video quality:",
+                        ["Best", "1080p", "720p", "480p"],
+                        "1080p (Full HD) plays well everywhere. “Best” can be 4K: sharper, "
+                        "but much bigger files that some older devices can't play.")
+        self._segmented(parent, "default_video_format", "Video file type:",
+                        ["mp4", "mkv", "webm"],
+                        "MP4 works on almost every phone, TV and computer — keep this unless "
+                        "you know you need MKV or WEBM.")
+        row = self._segmented(parent, "audio_quality", "MP3 quality (kbps):",
+                              ["128", "192", "256", "320"],
+                              "Higher numbers sound better but make bigger files. 192 is a good balance.")
+        self._row_checkbox(parent, "embed_thumbnail", "Add the video's picture to the file",
+                           "Stores the thumbnail inside the file, so it shows as cover art in music "
+                           "and video players.")
+        self._row_checkbox(parent, "write_subtitles", "Also download subtitles",
+                           "Saves a subtitle file next to the video (auto-generated ones when no "
+                           "others exist), in the language below.")
+        row4 = self._make_row(parent, "Subtitle language:",
+                              "A short language code, e.g. en (English), fr (French), de (German), es (Spanish).")
         var4 = ctk.StringVar(value=self._settings.get("subtitle_lang"))
         self._vars["subtitle_lang"] = var4
-        ctk.CTkEntry(row4, textvariable=var4, width=80).pack(side="left")
-        ctk.CTkLabel(row4, text="e.g. en, fr, de", text_color="gray",
-                     font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
+        ctk.CTkEntry(row4, textvariable=var4, width=80, font=theme.font(13)).pack(side="left")
+        ctk.CTkLabel(row4, text="e.g. en, fr, de", text_color=theme.MUTED,
+                     font=theme.font(12)).pack(side="left", padx=8)
         var4.trace_add("write", lambda *_: self._save("subtitle_lang", var4.get()))
-
-    # ── Performance ───────────────────────────────────────────────────────────
-
-    def _build_performance_section(self, parent: ctk.CTkFrame) -> None:
-        # Max retries
-        row = self._make_row(parent, "Max retries per download:")
-        var = ctk.IntVar(value=int(self._settings.get("max_retries")))
-        self._vars["max_retries"] = var
-        lbl = ctk.CTkLabel(row, text=str(var.get()), width=24)
-        ctk.CTkSlider(
-            row, from_=0, to=10, number_of_steps=10, variable=var, width=180,
-            command=lambda v: (self._save("max_retries", int(v)),
-                               lbl.configure(text=str(int(v)))),
-        ).pack(side="left", padx=(0, 12))
-        lbl.pack(side="left")
-
-        # Concurrent fragments
-        row2 = self._make_row(parent, "Concurrent fragments:")
-        var2 = ctk.IntVar(value=int(self._settings.get("concurrent_fragments")))
-        self._vars["concurrent_fragments"] = var2
-        lbl2 = ctk.CTkLabel(row2, text=str(var2.get()), width=24)
-        ctk.CTkSlider(
-            row2, from_=1, to=16, number_of_steps=15, variable=var2, width=180,
-            command=lambda v: (self._save("concurrent_fragments", int(v)),
-                               lbl2.configure(text=str(int(v)))),
-        ).pack(side="left", padx=(0, 12))
-        lbl2.pack(side="left")
-
-    # ── Network ───────────────────────────────────────────────────────────────
-
-    def _build_network_section(self, parent: ctk.CTkFrame) -> None:
-        # Rate limit
-        row = self._make_row(parent, "Rate limit (KB/s, 0 = unlimited):")
-        var = ctk.IntVar(value=int(self._settings.get("rate_limit_kb")))
-        self._vars["rate_limit_kb"] = var
-        ctk.CTkEntry(row, textvariable=var, width=90).pack(side="left")
-        var.trace_add("write", lambda *_: self._save_int("rate_limit_kb", var))
-
-        # Proxy
-        row2 = self._make_row(parent, "Proxy URL (leave blank for none):")
-        var2 = ctk.StringVar(value=self._settings.get("proxy_url"))
-        self._vars["proxy_url"] = var2
-        ctk.CTkEntry(
-            row2, textvariable=var2, width=300,
-            placeholder_text="http://user:pass@host:port",
-            font=ctk.CTkFont(size=11),
-        ).pack(side="left")
-        var2.trace_add("write", lambda *_: self._save("proxy_url", var2.get()))
-
-    # ── Tools section (FFmpeg + JS runtime) ───────────────────────────────────
-
-    def _build_tools_section(self, parent: ctk.CTkFrame) -> None:
-        # ── FFmpeg binary location ────────────────────────────────────────────
-        ffmpeg_frame = ctk.CTkFrame(
-            parent, fg_color=("gray92", "#1A1A2E"), corner_radius=8
-        )
-        ffmpeg_frame.pack(fill="x", padx=4, pady=(4, 8))
-
-        header = ctk.CTkFrame(ffmpeg_frame, fg_color="transparent")
-        header.pack(fill="x", padx=12, pady=(10, 4))
-
-        ctk.CTkLabel(
-            header,
-            text="FFmpeg Binary Location",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        ).pack(side="left")
-
-        # Detected-at-startup badge
-        self._ffmpeg_status_lbl = ctk.CTkLabel(
-            header,
-            text=self._get_ffmpeg_status_text(),
-            font=ctk.CTkFont(size=11),
-            text_color=self._get_ffmpeg_status_color(),
-            anchor="e",
-        )
-        self._ffmpeg_status_lbl.pack(side="right")
-
-        ctk.CTkLabel(
-            ffmpeg_frame,
-            text=(
-                "Leave blank to use the auto-detected bundled FFmpeg (recommended).\n"
-                "Set a custom folder only if you need a specific build."
-            ),
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=12, pady=(0, 6))
-
-        path_row = ctk.CTkFrame(ffmpeg_frame, fg_color="transparent")
-        path_row.pack(fill="x", padx=12, pady=(0, 10))
-
-        var = ctk.StringVar(value=self._settings.get("ffmpeg_bin_dir") or "")
-        self._vars["ffmpeg_bin_dir"] = var
-
-        entry = ctk.CTkEntry(
-            path_row,
-            textvariable=var,
-            placeholder_text="e.g. C:\\ffmpeg\\bin  (blank = auto)",
-            font=ctk.CTkFont(size=11),
-            width=300,
-        )
-        entry.pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            path_row, text="Browse", width=70,
-            command=lambda: self._browse_folder(var),
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            path_row, text="Detect", width=70,
-            command=self._detect_ffmpeg,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            path_row, text="Clear", width=60,
-            fg_color="transparent", border_width=1,
-            text_color=("gray30", "gray70"),
-            command=lambda: var.set(""),
-        ).pack(side="left")
-
-        var.trace_add("write", lambda *_: self._on_ffmpeg_path_changed(var.get()))
-
-        # ── JS Runtime location ───────────────────────────────────────────────
-        js_frame = ctk.CTkFrame(
-            parent, fg_color=("gray92", "#1A1A2E"), corner_radius=8
-        )
-        js_frame.pack(fill="x", padx=4, pady=(0, 4))
-
-        js_header = ctk.CTkFrame(js_frame, fg_color="transparent")
-        js_header.pack(fill="x", padx=12, pady=(10, 4))
-
-        ctk.CTkLabel(
-            js_header,
-            text="JavaScript Runtime (for YouTube)",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        ).pack(side="left")
-
-        self._js_status_lbl = ctk.CTkLabel(
-            js_header,
-            text=self._get_js_status_text(),
-            font=ctk.CTkFont(size=11),
-            text_color=self._get_js_status_color(),
-            anchor="e",
-        )
-        self._js_status_lbl.pack(side="right")
-
-        ctk.CTkLabel(
-            js_frame,
-            text=(
-                "Node.js (v20+), QuickJS, Deno, or Bun. Required for YouTube downloads.\n"
-                "Leave blank to use the auto-detected runtime."
-            ),
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=12, pady=(0, 6))
-
-        js_path_row = ctk.CTkFrame(js_frame, fg_color="transparent")
-        js_path_row.pack(fill="x", padx=12, pady=(0, 10))
-
-        js_var = ctk.StringVar(
-            value=self._settings.get("js_runtime_override_path") or ""
-        )
-        self._vars["js_runtime_override_path"] = js_var
-
-        ctk.CTkEntry(
-            js_path_row,
-            textvariable=js_var,
-            placeholder_text="e.g. C:\\Program Files\\nodejs\\node.exe  (blank = auto)",
-            font=ctk.CTkFont(size=11),
-            width=300,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            js_path_row, text="Browse", width=70,
-            command=lambda: self._browse_file(
-                js_var,
-                title="Select JS runtime executable",
-                filetypes=[("Executables", "*.exe"), ("All files", "*.*")]
-                if os.name == "nt" else [("All files", "*")],
-            ),
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            js_path_row, text="Clear", width=60,
-            fg_color="transparent", border_width=1,
-            text_color=("gray30", "gray70"),
-            command=lambda: js_var.set(""),
-        ).pack(side="left")
-
-        js_var.trace_add("write", lambda *_: self._on_js_path_changed(js_var.get()))
 
     # ── Appearance ────────────────────────────────────────────────────────────
 
     def _build_appearance_section(self, parent: ctk.CTkFrame) -> None:
-        row = self._make_row(parent, "Theme:")
-        var = ctk.StringVar(value=self._settings.get("appearance_mode").capitalize())
+        row = self._make_row(parent, "Theme:",
+                             "“System” follows Windows' light/dark setting automatically.")
+        var = ctk.StringVar(value=str(self._settings.get("appearance_mode")).capitalize())
         self._vars["appearance_mode"] = var
-        ctk.CTkSegmentedButton(
-            row, values=["Dark", "Light", "System"],
-            variable=var, command=self._apply_theme,
-        ).pack(side="left")
+        ctk.CTkSegmentedButton(row, values=["System", "Light", "Dark"], variable=var,
+                               command=self._apply_theme, font=theme.font(13)).pack(side="left")
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Advanced: performance ─────────────────────────────────────────────────
 
-    @staticmethod
-    def _make_row(parent: ctk.CTkFrame, label: str) -> ctk.CTkFrame:
+    def _build_performance_section(self, parent: ctk.CTkFrame) -> None:
+        self._slider(parent, "max_retries", "Retries if a download fails:", 0, 10,
+                     "How many times to try again after a network hiccup before giving up.")
+        self._slider(parent, "concurrent_fragments", "Parallel connections:", 1, 16,
+                     "How many pieces of a video download at once. Higher can be faster on "
+                     "good connections; lower is gentler on slow ones.")
+        self._row_checkbox(parent, "ask_format_per_video", "Ask for the file type of every video",
+                           "Shows a pop-up for each link to choose MP4, MKV or WEBM. "
+                           "Useful only if you mix file types in one batch.")
+
+    # ── Advanced: network ─────────────────────────────────────────────────────
+
+    def _build_network_section(self, parent: ctk.CTkFrame) -> None:
+        row = self._make_row(parent, "Speed limit (KB/s):",
+                             "Caps download speed so other apps stay fast. 0 means no limit.")
+        var = ctk.IntVar(value=int(self._settings.get("rate_limit_kb")))
+        self._vars["rate_limit_kb"] = var
+        ctk.CTkEntry(row, textvariable=var, width=90, font=theme.font(13)).pack(side="left")
+        ctk.CTkLabel(row, text="0 = unlimited", text_color=theme.MUTED,
+                     font=theme.font(12)).pack(side="left", padx=8)
+        var.trace_add("write", lambda *_: self._save_int("rate_limit_kb", var))
+
+        row2 = self._make_row(parent, "Proxy:",
+                              "Only needed on networks that require one (some schools and offices). "
+                              "Leave blank otherwise.")
+        var2 = ctk.StringVar(value=self._settings.get("proxy_url"))
+        self._vars["proxy_url"] = var2
+        ctk.CTkEntry(row2, textvariable=var2, width=300, font=theme.font(12),
+                     placeholder_text="http://host:port  (blank = none)").pack(side="left")
+        var2.trace_add("write", lambda *_: self._save("proxy_url", var2.get()))
+
+    # ── Advanced: helper tools ────────────────────────────────────────────────
+
+    def _build_tools_section(self, parent: ctk.CTkFrame) -> None:
+        # FFmpeg
+        card = self._card(parent, "FFmpeg",
+                          "Joins video and audio and makes MP3s. Found automatically "
+                          "(bundled with the app, installed, or on PATH) — set a folder "
+                          "only to use a specific copy.")
+        self._ffmpeg_status_lbl = card["status"]
+        var = ctk.StringVar(value=self._settings.get("ffmpeg_bin_dir") or "")
+        self._vars["ffmpeg_bin_dir"] = var
+        row = card["row"]
+        ctk.CTkEntry(row, textvariable=var, width=300, font=theme.font(12),
+                     placeholder_text="Folder containing ffmpeg  (blank = automatic)",
+                     ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(row, text="Browse", width=70,
+                      command=lambda: self._browse_folder(var)).pack(side="left", padx=(0, 8))
+        detect = ctk.CTkButton(row, text="Detect", width=70, command=self._detect_ffmpeg)
+        detect.pack(side="left", padx=(0, 8))
+        add_tooltip(detect, "Look for FFmpeg again and fill in the folder it finds.")
+        ctk.CTkButton(row, text="Clear", width=60, fg_color="transparent", border_width=1,
+                      text_color=theme.MUTED, command=lambda: var.set("")).pack(side="left")
+        var.trace_add("write", lambda *_: self._on_ffmpeg_path_changed(var.get()))
+
+        # JS runtime
+        card = self._card(parent, "JavaScript runtime",
+                          "Deno, Node.js (v20+), Bun or QuickJS — lets the app read most "
+                          "YouTube videos. Found automatically; the home screen's “Fix” "
+                          "button can install Deno for you.")
+        self._js_status_lbl = card["status"]
+        js_var = ctk.StringVar(value=self._settings.get("js_runtime_override_path") or "")
+        self._vars["js_runtime_override_path"] = js_var
+        row = card["row"]
+        ctk.CTkEntry(row, textvariable=js_var, width=300, font=theme.font(12),
+                     placeholder_text="Path to deno.exe / node.exe  (blank = automatic)",
+                     ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row, text="Browse", width=70,
+            command=lambda: self._browse_file(
+                js_var, title="Select JS runtime executable",
+                filetypes=[("Programs", "*.exe"), ("All files", "*.*")]
+                if os.name == "nt" else [("All files", "*")]),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(row, text="Clear", width=60, fg_color="transparent", border_width=1,
+                      text_color=theme.MUTED, command=lambda: js_var.set("")).pack(side="left")
+        js_var.trace_add("write", lambda *_: self._on_js_path_changed(js_var.get()))
+        self._refresh_tool_status()
+
+    def _card(self, parent, title: str, desc: str) -> dict:
+        frame = ctk.CTkFrame(parent, fg_color=theme.CARD_BG, corner_radius=8)
+        frame.pack(fill="x", padx=4, pady=(4, 8))
+        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(10, 2))
+        ctk.CTkLabel(header, text=title, font=theme.font(13, "bold"), anchor="w").pack(side="left")
+        status = ctk.CTkLabel(header, text="", font=theme.font(12), anchor="e")
+        status.pack(side="right")
+        ctk.CTkLabel(frame, text=desc, font=theme.font(12), text_color=theme.MUTED,
+                     anchor="w", justify="left", wraplength=640).pack(fill="x", padx=12, pady=(0, 6))
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 10))
+        return {"status": status, "row": row}
+
+    # ── Row helpers ───────────────────────────────────────────────────────────
+
+    def _make_row(self, parent: ctk.CTkFrame, label: str, tip: str = "") -> ctk.CTkFrame:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=4, pady=4)
-        ctk.CTkLabel(row, text=label, width=240, anchor="w").pack(side="left")
+        lbl = ctk.CTkLabel(row, text=label, width=_LABEL_WIDTH, anchor="w", font=theme.font(13))
+        lbl.pack(side="left")
+        if tip:
+            add_tooltip(lbl, tip)
+            add_tooltip(row, tip)
         return row
 
-    def _row_checkbox(self, parent: ctk.CTkFrame, key: str, label: str) -> None:
+    def _segmented(self, parent, key: str, label: str, values: list[str], tip: str) -> ctk.CTkFrame:
+        row = self._make_row(parent, label, tip)
+        var = ctk.StringVar(value=str(self._settings.get(key)))
+        self._vars[key] = var
+        seg = ctk.CTkSegmentedButton(row, values=values, variable=var, font=theme.font(13))
+        seg.pack(side="left")
+        add_tooltip(seg, tip)
+        var.trace_add("write", lambda *_: self._save(key, var.get()))
+        return row
+
+    def _slider(self, parent, key: str, label: str, lo: int, hi: int, tip: str) -> None:
+        row = self._make_row(parent, label, tip)
+        var = ctk.IntVar(value=int(self._settings.get(key)))
+        self._vars[key] = var
+        value_lbl = ctk.CTkLabel(row, text=str(var.get()), width=28, font=theme.font(13))
+        slider = ctk.CTkSlider(row, from_=lo, to=hi, number_of_steps=hi - lo, variable=var,
+                               width=200, command=lambda v: self._save(key, int(v)))
+        slider.pack(side="left", padx=(0, 12))
+        value_lbl.pack(side="left")
+        add_tooltip(slider, tip)
+        # keep the number in sync however the value changes (drag, reset, reload)
+        var.trace_add("write", lambda *_: value_lbl.configure(text=str(var.get())))
+
+    def _row_checkbox(self, parent: ctk.CTkFrame, key: str, label: str, tip: str = "") -> None:
         var = ctk.BooleanVar(value=bool(self._settings.get(key)))
         self._vars[key] = var
-        ctk.CTkCheckBox(
-            parent, text=label, variable=var,
-            command=lambda: self._save(key, var.get()),
-        ).pack(anchor="w", padx=4, pady=3)
+        box = ctk.CTkCheckBox(parent, text=label, variable=var, font=theme.font(13),
+                              command=lambda: self._save(key, var.get()))
+        box.pack(anchor="w", padx=4, pady=4)
+        add_tooltip(box, tip)
 
     def _browse_folder(self, var: ctk.StringVar) -> None:
         folder = fd.askdirectory(title="Select folder")
         if folder:
             var.set(folder)
 
-    def _browse_file(
-        self,
-        var: ctk.StringVar,
-        title: str = "Select file",
-        filetypes: list | None = None,
-    ) -> None:
-        path = fd.askopenfilename(
-            title=title,
-            filetypes=filetypes or [("All files", "*")],
-        )
+    def _browse_file(self, var: ctk.StringVar, title: str = "Select file",
+                     filetypes: list | None = None) -> None:
+        path = fd.askopenfilename(title=title, filetypes=filetypes or [("All files", "*")])
         if path:
             var.set(path)
 
@@ -410,7 +325,7 @@ class SettingsTab(ctk.CTkFrame):
         try:
             self._save(key, var.get())
         except Exception:
-            pass
+            pass   # half-typed number
 
     def _apply_theme(self, value: str) -> None:
         self._save("appearance_mode", value.lower())
@@ -422,153 +337,115 @@ class SettingsTab(ctk.CTkFrame):
         """Persist the user-supplied FFmpeg folder and update the status badge."""
         stripped = value.strip()
         self._save("ffmpeg_bin_dir", stripped)
-
         if stripped:
-            # User set an explicit path — validate it immediately
-            exe = os.path.join(
-                stripped, "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-            )
+            exe = os.path.join(stripped, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
             if os.path.isfile(exe):
-                # Push it into the internal key yt-dlp reads
                 self._save("_ffmpeg_location", stripped)
-                self._ffmpeg_status_lbl.configure(
-                    text="✓ Valid path", text_color="#4CAF50"
-                )
+                self._set_status(self._ffmpeg_status_lbl, True, "✓ Using this folder")
                 _log.info("FFmpeg location set by user: %s", stripped)
             else:
-                self._ffmpeg_status_lbl.configure(
-                    text="⚠ ffmpeg not found in folder", text_color="#FF6B6B"
-                )
+                self._set_status(self._ffmpeg_status_lbl, False, "⚠ No ffmpeg in that folder")
         else:
-            # Blank — revert to auto-detected path
             auto = self._auto_detect_ffmpeg()
             self._save("_ffmpeg_location", auto)
-            if auto:
-                self._ffmpeg_status_lbl.configure(
-                    text=f"✓ Auto: {auto}", text_color="#4CAF50"
-                )
-            else:
-                self._ffmpeg_status_lbl.configure(
-                    text="⚠ Not found", text_color="#FF6B6B"
-                )
+            self._set_status(self._ffmpeg_status_lbl, bool(auto),
+                             "✓ Found automatically" if auto else "⚠ Not found")
 
     def _detect_ffmpeg(self) -> None:
-        """Trigger a live re-detection and populate the entry with the result."""
         path = self._auto_detect_ffmpeg()
         if path:
             var = self._vars.get("ffmpeg_bin_dir")
             if var:
                 var.set(path)
-            self._ffmpeg_status_lbl.configure(
-                text=f"✓ Detected: {path}", text_color="#4CAF50"
-            )
+            self._set_status(self._ffmpeg_status_lbl, True, f"✓ Found: {path}")
         else:
-            self._ffmpeg_status_lbl.configure(
-                text="⚠ Could not detect", text_color="#FF6B6B"
-            )
+            self._set_status(self._ffmpeg_status_lbl, False, "⚠ Couldn't find FFmpeg")
 
     @staticmethod
     def _auto_detect_ffmpeg() -> str:
-        """Return the directory containing ffmpeg from system PATH, or ''."""
-        import shutil
-        found = shutil.which("ffmpeg")
-        return os.path.dirname(os.path.abspath(found)) if found else ""
+        """Return the auto-detected FFmpeg folder (bundled, PATH, WinGet...), or ''."""
+        from utils.tool_setup import find_ffmpeg_dir
+        return find_ffmpeg_dir("")
 
     # ── JS runtime path handling ──────────────────────────────────────────────
 
     def _on_js_path_changed(self, value: str) -> None:
         stripped = value.strip()
         self._save("js_runtime_override_path", stripped)
-
         if stripped:
             if os.path.isfile(stripped):
-                # Detect which runtime this is and push into internal settings
                 name = self._detect_runtime_name(stripped)
                 self._save("_js_runtime_name", name)
                 self._save("_js_runtime_path", stripped)
-                self._js_status_lbl.configure(
-                    text=f"✓ {name} set", text_color="#4CAF50"
-                )
+                self._set_status(self._js_status_lbl, True, f"✓ Using {name}")
                 _log.info("JS runtime set by user: %s (%s)", stripped, name)
             else:
-                self._js_status_lbl.configure(
-                    text="⚠ File not found", text_color="#FF6B6B"
-                )
+                self._set_status(self._js_status_lbl, False, "⚠ File not found")
         else:
-            # Blank — revert to auto-detected runtime
             try:
-                from js_runtime_manager import detect_js_runtime
-                result = detect_js_runtime()
-                self._save("_js_runtime_name", result.name)
+                from utils.tool_setup import find_js_runtime
+                result = find_js_runtime("")
+                self._save("_js_runtime_name", result.name if result.available else "")
                 self._save("_js_runtime_path", result.path or "")
-                if result.available:
-                    self._js_status_lbl.configure(
-                        text=f"✓ Auto: {result.name} v{result.version}",
-                        text_color="#4CAF50",
-                    )
-                else:
-                    self._js_status_lbl.configure(
-                        text="⚠ No runtime found", text_color="#FF6B6B"
-                    )
+                self._set_status(self._js_status_lbl, result.available,
+                                 f"✓ Found {result.name} {result.version}" if result.available
+                                 else "⚠ None found")
             except Exception:
-                self._js_status_lbl.configure(
-                    text="⚠ Detection failed", text_color="#FF6B6B"
-                )
+                self._set_status(self._js_status_lbl, False, "⚠ Detection failed")
 
     @staticmethod
     def _detect_runtime_name(path: str) -> str:
-        """Guess the runtime name from the binary filename."""
-        base = os.path.basename(path).lower().replace(".exe", "")
-        for name in ("node", "nodejs", "qjs", "quickjs", "deno", "bun"):
-            if name in base:
-                return "node" if "node" in name else name
-        return "node"  # safe default
+        from utils.tool_setup import runtime_name_for
+        return runtime_name_for(path)
 
-    # ── Status badge helpers ──────────────────────────────────────────────────
+    # ── Status badges ─────────────────────────────────────────────────────────
 
-    def _get_ffmpeg_status_text(self) -> str:
-        # Check user-saved directory first
+    @staticmethod
+    def _set_status(label: ctk.CTkLabel, ok: bool, text: str) -> None:
+        label.configure(text=text, text_color=theme.OK if ok else theme.BAD)
+
+    def _refresh_tool_status(self) -> None:
+        exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
         saved = self._settings.get("ffmpeg_bin_dir") or ""
-        if saved and os.path.isdir(saved):
-            exe = os.path.join(saved, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-            if os.path.isfile(exe):
-                return f"✓ Saved: {saved}"
-        # Fall back to _ffmpeg_location written at startup
         loc = self._settings.get("_ffmpeg_location") or ""
-        if loc and os.path.isdir(loc):
-            exe = os.path.join(loc, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-            if os.path.isfile(exe):
-                return f"✓ PATH: {loc}"
-        return "⚠ Not found — set path below"
-
-    def _get_ffmpeg_status_color(self) -> str:
-        return "#4CAF50" if "✓" in self._get_ffmpeg_status_text() else "#FF6B6B"
-
-    def _get_js_status_text(self) -> str:
+        if saved and os.path.isfile(os.path.join(saved, exe)):
+            self._set_status(self._ffmpeg_status_lbl, True, "✓ Using your folder")
+        elif loc and os.path.isfile(os.path.join(loc, exe)):
+            self._set_status(self._ffmpeg_status_lbl, True, "✓ Found automatically")
+        else:
+            self._set_status(self._ffmpeg_status_lbl, False, "⚠ Not found")
         name = self._settings.get("_js_runtime_name") or ""
-        path = self._settings.get("_js_runtime_path") or ""
         if name and name != "none":
-            return f"✓ {name} detected" + (f" ({path})" if path else "")
-        return "⚠ No runtime found"
+            self._set_status(self._js_status_lbl, True, f"✓ Using {name}")
+        else:
+            self._set_status(self._js_status_lbl, False, "⚠ None found")
 
-    def _get_js_status_color(self) -> str:
-        return "#4CAF50" if "✓" in self._get_js_status_text() else "#FF6B6B"
+    # ── Reload / reset ────────────────────────────────────────────────────────
 
-    # ── Reset ─────────────────────────────────────────────────────────────────
-
-    def _reset_defaults(self) -> None:
-        self._settings.reset_to_defaults()
+    def reload_from_settings(self) -> None:
+        """Sync every widget with the stored settings (they can also be
+        changed from the Downloader tab or the setup dialog)."""
         for key, var in self._vars.items():
             new_val = self._settings.get(key)
             try:
                 if isinstance(var, ctk.BooleanVar):
-                    var.set(bool(new_val))
+                    new_val = bool(new_val)
                 elif isinstance(var, ctk.IntVar):
-                    var.set(int(new_val))
+                    new_val = int(new_val)
+                elif key == "appearance_mode":
+                    new_val = str(new_val).capitalize()
                 else:
-                    var.set(str(new_val) if new_val is not None else "")
+                    new_val = str(new_val) if new_val is not None else ""
+                if var.get() != new_val:
+                    var.set(new_val)
             except Exception:
                 pass
+        self._refresh_tool_status()
+
+    def _reset_defaults(self) -> None:
+        self._settings.reset_to_defaults()
+        self.reload_from_settings()
+        ctk.set_appearance_mode(str(self._settings.get("appearance_mode")))
         if self._on_changed:
             self._on_changed("__reset__", None)
         _log.info("Settings reset to defaults via UI.")

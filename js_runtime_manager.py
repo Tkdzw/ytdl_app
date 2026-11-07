@@ -250,7 +250,7 @@ def _find_nvm_node() -> Optional[JsRuntimeResult]:
 def detect_js_runtime() -> JsRuntimeResult:
     """
     Probe for JavaScript runtimes in preference order:
-    node → qjs → deno → bun.
+    node → deno → bun → qjs.
 
     Returns the first one that is found and meets yt-dlp's minimum version
     requirements. Returns a ``JsRuntimeResult(available=False)`` if none found.
@@ -286,12 +286,6 @@ def detect_js_runtime() -> JsRuntimeResult:
         _log.info("JS runtime: node (nodejs) v%s at %s", result.version, result.path)
         return result
 
-    # Try QuickJS (tiny binary, great choice for bundled apps)
-    result = _find_binary("qjs", _check_qjs, qjs_extras)
-    if result:
-        _log.info("JS runtime: qjs v%s at %s", result.version, result.path)
-        return result
-
     # Try Deno
     result = _find_binary("deno", _check_deno, deno_extras)
     if result:
@@ -304,10 +298,16 @@ def detect_js_runtime() -> JsRuntimeResult:
         _log.info("JS runtime: bun v%s at %s", result.version, result.path)
         return result
 
+    # QuickJS last: it works, but yt-dlp's challenge solving is much slower on it
+    result = _find_binary("qjs", _check_qjs, qjs_extras)
+    if result:
+        _log.info("JS runtime: qjs v%s at %s", result.version, result.path)
+        return result
+
     _log.warning(
         "No JavaScript runtime found. "
         "YouTube downloads may fail for some videos. "
-        "Install Node.js from https://nodejs.org/ to fix this."
+        "Install Deno or Node.js (Downloader > Fix) to fix this."
     )
     return _NONE_RESULT
 

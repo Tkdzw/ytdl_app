@@ -6,15 +6,20 @@ from __future__ import annotations
 from typing import Any
 import customtkinter as ctk
 
+from ui import theme
+
 from utils.history_manager import HistoryManager
 from utils.settings_manager import SettingsManager
+from utils.tool_setup import ToolStatus
 from utils.update_checker import UpdateChecker
 from ui.sidebar import Sidebar
 from ui.tab_downloader import DownloaderTab
-from ui.tab_batch_queue import BatchQueueTab
 from ui.tab_history import HistoryTab
 from ui.tab_settings import SettingsTab
 from ui.dialogs import show_about
+
+# Settings whose change means FFmpeg / the JS runtime must be looked up again
+_TOOL_KEYS = {"ffmpeg_bin_dir", "js_runtime_override_path"}
 
 
 class MainWindow(ctk.CTkFrame):
@@ -28,16 +33,15 @@ class MainWindow(ctk.CTkFrame):
         master: ctk.CTkBaseClass,
         history_manager: HistoryManager,
         settings: SettingsManager,
-        ffmpeg_ok: bool,
-        js_runtime=None,
+        tools: ToolStatus,
         **kwargs,
     ) -> None:
         super().__init__(master, corner_radius=0, fg_color="transparent", **kwargs)
         self._history_manager = history_manager
         self._settings = settings
-        self._ffmpeg_ok = ffmpeg_ok
-        self._js_runtime = js_runtime
+        self._tools = tools
         self._active_tab: str = "Downloader"
+        self._tool_refresh_job = None
 
         self._build()
         self._run_update_check()
@@ -52,23 +56,18 @@ class MainWindow(ctk.CTkFrame):
         )
         self._sidebar.pack(side="left", fill="y")
 
-        ctk.CTkFrame(self, width=1, fg_color="#333333").pack(side="left", fill="y")
+        ctk.CTkFrame(self, width=1, fg_color=theme.DIVIDER).pack(side="left", fill="y")
 
         self._content = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self._content.pack(side="left", fill="both", expand=True)
-
-        self._batch_queue_tab = BatchQueueTab(
-            self._content,
-            on_retry=lambda items: self._downloader_tab.retry_failed(items),
-        )
 
         self._downloader_tab = DownloaderTab(
             self._content,
             history_manager=self._history_manager,
             settings=self._settings,
-            ffmpeg_ok=self._ffmpeg_ok,
-            js_runtime=self._js_runtime,
-            on_queue_update=self._on_queue_update,
+            ffmpeg_ok=self._tools.ffmpeg_ok,
+            js_runtime=self._tools.js,
+            on_fix_setup=lambda: self.winfo_toplevel().show_setup(),
         )
 
         self._history_tab = HistoryTab(
@@ -84,12 +83,16 @@ class MainWindow(ctk.CTkFrame):
 
         self._tab_map: dict[str, ctk.CTkFrame] = {
             "Downloader":  self._downloader_tab,
-            "Batch Queue": self._batch_queue_tab,
             "History":     self._history_tab,
             "Settings":    self._settings_tab,
         }
 
         self._switch_tab("Downloader")
+
+        # Ctrl+1/2/3 switch tabs
+        top = self.winfo_toplevel()
+        for i, name in enumerate(("Downloader", "History", "Settings"), start=1):
+            top.bind(f"<Control-Key-{i}>", lambda _e, n=name: self._sidebar.select(n), add="+")
 
     # ── Tab switching ─────────────────────────────────────────────────────────
 
@@ -104,16 +107,27 @@ class MainWindow(ctk.CTkFrame):
             self._active_tab = tab_name
         if tab_name == "History":
             self._history_tab.refresh()
+        elif tab_name == "Settings":
+            self._settings_tab.reload_from_settings()
+
+    # ── Tools ─────────────────────────────────────────────────────────────────
+
+    def update_tools(self, status: ToolStatus) -> None:
+        self._tools = status
+        self._downloader_tab.update_tools(status.ffmpeg_ok, status.js)
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
-
-    def _on_queue_update(self, items: list[dict[str, Any]]) -> None:
-        self._batch_queue_tab.refresh(items)
 
     def _on_settings_changed(self, key: str, value: Any) -> None:
         self._downloader_tab.on_settings_changed(key, value)
         if key == "appearance_mode":
             ctk.set_appearance_mode(str(value))
+        if key in _TOOL_KEYS or key == "__reset__":
+            # debounce: path fields save on every keystroke
+            if self._tool_refresh_job:
+                self.after_cancel(self._tool_refresh_job)
+            self._tool_refresh_job = self.after(
+                700, lambda: self.winfo_toplevel().refresh_tools())
 
     def _show_about(self) -> None:
         show_about(self.winfo_toplevel())

@@ -17,9 +17,10 @@ DEFAULTS: dict[str, Any] = {
     "output_dir": os.path.join(os.path.expanduser("~"), "Downloads", "YTBatchDL"),
     "default_video_format": "mp4",
     "default_mode": "Video",
+    "video_quality": "1080p",       # "Best" | "1080p" | "720p" | "480p"
     "audio_quality": "192",
-    "appearance_mode": "dark",
-    "ask_format_per_video": True,
+    "appearance_mode": "system",    # follow Windows light/dark
+    "ask_format_per_video": False,
     "auto_open_folder": False,
     "max_retries": 2,
     "embed_thumbnail": False,
@@ -36,6 +37,7 @@ DEFAULTS: dict[str, Any] = {
     "_ffmpeg_location": "",         # resolved FFmpeg directory used by yt-dlp
     "_js_runtime_name": "",         # "node" | "qjs" | "deno" | "bun" | ""
     "_js_runtime_path": "",         # absolute path to JS runtime binary
+    "_schema": 2,                   # bump when a migration is added in _migrate
 }
 
 
@@ -79,10 +81,26 @@ class SettingsManager:
                 stored = json.load(f)
             self._data = {**DEFAULTS, **stored}
             _log.debug("Settings loaded from %s", self._path)
+            if self._migrate(stored.get("_schema", 1)):
+                self._save()
         except (FileNotFoundError, json.JSONDecodeError):
             _log.info("No settings file found; using defaults.")
             self._data = dict(DEFAULTS)
             self._save()
+
+    def _migrate(self, schema: int) -> bool:
+        """Upgrade settings saved by older versions. Returns True if changed."""
+        if schema >= DEFAULTS["_schema"]:
+            return False
+        if schema < 2:
+            # v1 saved the full defaults on first run, so "ask format per
+            # video" (formerly on by default) is stored as True for everyone.
+            # It meant one pop-up per URL; the home screen now has a format
+            # picker, so switch it off once.
+            self._data["ask_format_per_video"] = False
+        self._data["_schema"] = DEFAULTS["_schema"]
+        _log.info("Settings migrated from schema %s", schema)
+        return True
 
     def _save(self) -> None:
         try:

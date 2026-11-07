@@ -4,16 +4,16 @@ Runs inside a background thread; communicates back via callbacks.
 """
 from __future__ import annotations
 
+import glob
 import os
 import re
-import shutil
-import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import yt_dlp
 
 from utils.logger import AppLogger
+from utils.tool_setup import find_ffmpeg_dir
 
 _log = AppLogger.get_logger(__name__)
 
@@ -62,6 +62,9 @@ class ProgressData:
     speed: str = ""
     eta: str = ""
     filename: str = ""
+    title: str = ""
+    duration: Optional[float] = None   # seconds, when known
+    eta_seconds: Optional[float] = None
 
 
 @dataclass
@@ -69,6 +72,7 @@ class DownloadRequest:
     url: str
     mode: str                        # "video" | "audio"
     video_format: str = "mp4"
+    video_quality: str = "best"      # "best" or a max height like "1080p"
     output_dir: str = field(default_factory=lambda: _DEFAULT_OUTPUT_DIR)
     audio_quality: str = "192"
     max_retries: int = 2
@@ -97,6 +101,7 @@ class DownloadResult:
     # 1-based position in the worker's request list, so callers can match
     # results to queue rows even when the same URL appears twice.
     index: int = 0
+    cancelled: bool = False
 
 
 def _final_filepaths(info: dict, ydl: "yt_dlp.YoutubeDL") -> list[str]:
@@ -131,43 +136,8 @@ def _final_filepaths(info: dict, ydl: "yt_dlp.YoutubeDL") -> list[str]:
 # ── Callback aliases ──────────────────────────────────────────────────────────
 
 ProgressCallback = Callable[[ProgressData], None]
-DoneCallback = Callable[[DownloadResult], None]
 LogCallback = Callable[[str], None]
-ItemStartCallback = Callable[[str, int, int], None]
-
-
-# ── FFmpeg location resolver ──────────────────────────────────────────────────
-
-def _resolve_ffmpeg_location(stored_dir: str) -> str:
-    """
-    Return the directory containing the ffmpeg binary.
-
-    Resolution order:
-      1. stored_dir from settings — the folder the user set in Settings > Tools.
-         This is persisted across restarts and is always tried first.
-      2. shutil.which("ffmpeg") — system PATH fallback for when the user
-         has ffmpeg on PATH but hasn't set it in Settings yet.
-
-    Returns "" if nothing is found so yt-dlp surfaces a clear error message.
-    """
-    # 1. User-supplied / previously saved path
-    if stored_dir and os.path.isdir(stored_dir):
-        exe = os.path.join(stored_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-        if os.path.isfile(exe):
-            _log.debug("FFmpeg from saved location: %s", exe)
-            return stored_dir
-
-    # 2. System PATH fallback
-    found = shutil.which("ffmpeg")
-    if found:
-        directory = os.path.dirname(os.path.abspath(found))
-        _log.info("FFmpeg found on system PATH: %s", found)
-        return directory
-
-    _log.warning(
-        "FFmpeg not found. Set the FFmpeg bin folder in Settings > Tools."
-    )
-    return ""
+CancelCheck = Callable[[], bool]
 
 
 # ── Engine ────────────────────────────────────────────────────────────────────
@@ -180,11 +150,21 @@ class DownloadEngine:
         request: DownloadRequest,
         on_progress: Optional[ProgressCallback] = None,
         on_log: Optional[LogCallback] = None,
+        cancel_check: Optional[CancelCheck] = None,
     ) -> DownloadResult:
+        """
+        Download one URL. If *cancel_check* returns True while the download
+        runs, it is stopped at the next progress tick (within a second or so)
+        and its partial files are removed.
+        """
         os.makedirs(request.output_dir, exist_ok=True)
-        ydl_opts = self._build_opts(request, on_progress, on_log)
+        partials: set[str] = set()
+        ydl_opts = self._build_opts(request, on_progress, on_log, cancel_check, partials)
         title = request.url
         filepaths: list[str] = []
+
+        def cancelled() -> bool:
+            return bool(cancel_check and cancel_check())
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -195,14 +175,19 @@ class DownloadEngine:
             return DownloadResult(url=request.url, title=title,
                                   filepath=filepaths[0] if filepaths else "",
                                   success=True, filepaths=filepaths)
-        except yt_dlp.utils.DownloadError as exc:
-            msg = _strip_ansi(str(exc))
-            _log.error("DownloadError for %s: %s", request.url, msg)
-            return DownloadResult(url=request.url, title=title,
-                                  filepath="", success=False, error_message=msg)
         except Exception as exc:
-            msg = _strip_ansi(f"Unexpected error: {exc}")
-            _log.exception("Unexpected error for %s", request.url)
+            if cancelled() or isinstance(exc, yt_dlp.utils.DownloadCancelled):
+                _remove_partials(partials)
+                _log.info("Cancelled: %s", request.url)
+                return DownloadResult(url=request.url, title=title, filepath="",
+                                      success=False, error_message="Cancelled",
+                                      cancelled=True)
+            msg = _strip_ansi(str(exc))
+            if isinstance(exc, yt_dlp.utils.DownloadError):
+                _log.error("DownloadError for %s: %s", request.url, msg)
+            else:
+                msg = f"Unexpected error: {msg}"
+                _log.exception("Unexpected error for %s", request.url)
             return DownloadResult(url=request.url, title=title,
                                   filepath="", success=False, error_message=msg)
 
@@ -211,6 +196,8 @@ class DownloadEngine:
         req: DownloadRequest,
         on_progress: Optional[ProgressCallback],
         on_log: Optional[LogCallback],
+        cancel_check: Optional[CancelCheck] = None,
+        partials: Optional[set] = None,
     ) -> dict:
         outtmpl = os.path.join(req.output_dir, "%(title)s.%(ext)s")
 
@@ -221,8 +208,8 @@ class DownloadEngine:
             "quiet": True,
             "no_warnings": False,
             "ignoreerrors": False,
-            "progress_hooks": [self._make_progress_hook(on_progress)],
-            "postprocessor_hooks": [],
+            "progress_hooks": [self._make_progress_hook(on_progress, cancel_check, partials)],
+            "postprocessor_hooks": [_make_pp_hook(cancel_check)],
             "retries": req.max_retries,
             "fragment_retries": req.max_retries,
             "concurrent_fragment_downloads": req.concurrent_fragments,
@@ -246,14 +233,17 @@ class DownloadEngine:
             base_opts["proxy"] = req.proxy_url
 
         # ── FFmpeg ────────────────────────────────────────────────────────────
-        ffmpeg_dir = _resolve_ffmpeg_location(req.ffmpeg_location)
+        ffmpeg_dir = find_ffmpeg_dir(req.ffmpeg_location)
         if ffmpeg_dir:
             base_opts["ffmpeg_location"] = ffmpeg_dir
             _log.debug("ffmpeg_location: %s", ffmpeg_dir)
 
         # ── JS runtime ────────────────────────────────────────────────────────
         js_runtimes = _build_js_runtimes_param(req.js_runtime_name, req.js_runtime_path)
-        base_opts["js_runtimes"] = js_runtimes
+        if js_runtimes:
+            # Only override when we found one; an empty dict would switch off
+            # yt-dlp's own default (Deno on PATH).
+            base_opts["js_runtimes"] = js_runtimes
 
         if on_log:
             base_opts["logger"] = _YtdlpLogger(on_log)
@@ -262,7 +252,7 @@ class DownloadEngine:
             base_opts.update(self._audio_opts(req.audio_quality, req.embed_thumbnail))
         else:
             base_opts.update(self._video_opts(
-                req.video_format, req.embed_thumbnail,
+                req.video_format, req.video_quality, req.embed_thumbnail,
                 req.write_subtitles, req.subtitle_lang,
             ))
 
@@ -285,6 +275,7 @@ class DownloadEngine:
     @staticmethod
     def _video_opts(
         fmt: str,
+        quality: str = "best",
         embed_thumbnail: bool = False,
         write_subtitles: bool = False,
         subtitle_lang: str = "en",
@@ -294,7 +285,7 @@ class DownloadEngine:
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
         opts: dict = {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+            "format": _video_format_selector(merge_fmt, quality),
             "merge_output_format": merge_fmt,
             "postprocessors": pps,
             "writethumbnail": embed_thumbnail,
@@ -310,28 +301,102 @@ class DownloadEngine:
     @staticmethod
     def _make_progress_hook(
         on_progress: Optional[ProgressCallback],
+        cancel_check: Optional[CancelCheck] = None,
+        partials: Optional[set] = None,
     ) -> Callable[[dict], None]:
         def hook(d: dict) -> None:
+            # Raising here is yt-dlp's supported way to abort a download.
+            if cancel_check and cancel_check():
+                raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
+            if partials is not None and d.get("tmpfilename"):
+                partials.add(d["tmpfilename"])
             if on_progress is None:
                 return
+            info = d.get("info_dict") or {}
             status = d.get("status", "")
             if status == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 1
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 downloaded = d.get("downloaded_bytes", 0)
-                percent = min((downloaded / total) * 100, 100.0)
+                if total:
+                    percent = min(downloaded / total * 100, 100.0)
+                elif d.get("fragment_count"):
+                    percent = min((d.get("fragment_index") or 0) / d["fragment_count"] * 100, 100.0)
+                else:
+                    percent = 0.0
                 on_progress(ProgressData(
                     status="downloading",
                     percent=percent,
                     speed=_fmt_speed(d.get("speed") or 0),
                     eta=_fmt_eta(d.get("eta")),
                     filename=d.get("filename", ""),
+                    title=info.get("title") or "",
+                    duration=info.get("duration"),
+                    eta_seconds=d.get("eta"),
                 ))
             elif status == "finished":
                 on_progress(ProgressData(
                     status="finished", percent=100.0,
                     filename=d.get("filename", ""),
+                    title=info.get("title") or "",
+                    duration=info.get("duration"),
                 ))
         return hook
+
+
+def _make_pp_hook(cancel_check: Optional[CancelCheck]) -> Callable[[dict], None]:
+    """Stop before the next FFmpeg step when cancelled (a running step finishes)."""
+    def hook(d: dict) -> None:
+        if cancel_check and cancel_check() and d.get("status") == "started":
+            raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
+    return hook
+
+
+def _remove_partials(paths: set) -> None:
+    """Delete a cancelled download's leftovers (.part, .ytdl, fragments)."""
+    for path in paths:
+        for candidate in [path, path + ".ytdl", *glob.glob(glob.escape(path) + "-Frag*")]:
+            try:
+                if os.path.isfile(candidate):
+                    os.remove(candidate)
+            except OSError as exc:
+                _log.debug("Could not remove partial %s: %s", candidate, exc)
+
+
+# ── Format selection ──────────────────────────────────────────────────────────
+
+def _max_height(quality: str) -> Optional[int]:
+    """'1080p' -> 1080; 'best' / anything unparseable -> None (no cap)."""
+    digits = "".join(c for c in (quality or "") if c.isdigit())
+    return int(digits) if digits else None
+
+
+def _video_format_selector(container: str, quality: str) -> str:
+    """
+    Build a yt-dlp format string for *container* capped at *quality*.
+
+    - mp4 with a height cap prefers H.264 + AAC, which plays on practically
+      every device and TV; "best" keeps the highest resolution (may be AV1/VP9).
+    - webm prefers VP9/AV1 + Opus, since H.264/AAC cannot go in a webm file.
+    - mkv takes whatever is best.
+    Every chain ends in a plain fallback so a download never fails for lack
+    of an exact match.
+    """
+    h = _max_height(quality)
+    cap = f"[height<={h}]" if h else ""
+    if container == "webm":
+        chain = [f"bv{cap}[ext=webm]+ba[ext=webm]", f"bv{cap}+ba", f"b{cap}"]
+    elif container == "mkv":
+        chain = [f"bv{cap}+ba", f"b{cap}"]
+    else:  # mp4
+        chain = [f"bv{cap}[ext=mp4]+ba[ext=m4a]", f"bv{cap}+ba", f"b{cap}"]
+        if h:
+            chain.insert(0, f"bv{cap}[vcodec^=avc1]+ba[ext=m4a]")
+    if h:
+        # Nothing at or below the cap: take the smallest larger video
+        # (the closest match) rather than failing.
+        chain.append("wv+ba")
+    chain.append("bv*+ba/b")
+    return "/".join(chain)
 
 
 # ── JS runtimes param builder ─────────────────────────────────────────────────
@@ -346,74 +411,6 @@ def _build_js_runtimes_param(runtime_name: str, runtime_path: str) -> dict:
     if name in ("node", "qjs", "deno", "bun"):
         return {name: {}}
     return {}
-
-
-# ── Worker ────────────────────────────────────────────────────────────────────
-
-class DownloadWorker(threading.Thread):
-    """Processes DownloadRequests sequentially in a daemon thread."""
-
-    def __init__(
-        self,
-        requests: list[DownloadRequest],
-        on_progress: Optional[ProgressCallback] = None,
-        on_item_start: Optional[ItemStartCallback] = None,
-        on_item_done: Optional[DoneCallback] = None,
-        on_log: Optional[LogCallback] = None,
-        on_all_done: Optional[Callable[[], None]] = None,
-    ) -> None:
-        super().__init__(daemon=True)
-        self._requests = requests
-        self._on_progress = on_progress
-        self._on_item_start = on_item_start
-        self._on_item_done = on_item_done
-        self._on_log = on_log
-        self._on_all_done = on_all_done
-        self._engine = DownloadEngine()
-        self._stop_event = threading.Event()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    @property
-    def is_cancelled(self) -> bool:
-        return self._stop_event.is_set()
-
-    def run(self) -> None:
-        total = len(self._requests)
-        completed = failed = 0
-
-        for index, req in enumerate(self._requests, start=1):
-            if self._stop_event.is_set():
-                if self._on_log:
-                    self._on_log(f"⏹ Cancelled — {index-1}/{total} processed.")
-                break
-
-            if self._on_item_start:
-                self._on_item_start(req.url, index, total)
-
-            _log.info("[%d/%d] Starting: %s [%s]", index, total, req.url, req.mode)
-
-            result = self._engine.download(
-                req, on_progress=self._on_progress, on_log=self._on_log
-            )
-            result.index = index
-
-            if result.success:
-                completed += 1
-            else:
-                failed += 1
-
-            if self._on_item_done:
-                self._on_item_done(result)
-
-        if self._on_log:
-            self._on_log(
-                f"━━ Session complete: {completed} succeeded, {failed} failed "
-                f"of {total} total ━━"
-            )
-        if self._on_all_done:
-            self._on_all_done()
 
 
 # ── yt-dlp logger adapter ─────────────────────────────────────────────────────

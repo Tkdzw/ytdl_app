@@ -1,7 +1,7 @@
 """
 ffmpeg_manager.py
 ─────────────────────────────────────────────────────────────────────────────
-Thin FFmpeg resolver.
+Thin FFmpeg resolver (used for the About dialog's version display).
 
 FFmpeg is located in this order:
   1. Directory saved by the user in Settings > Tools (ffmpeg_bin_dir)
@@ -23,13 +23,6 @@ from typing import Optional
 
 class FFmpegNotFoundError(RuntimeError):
     """Raised when FFmpeg cannot be located."""
-
-
-class FFmpegConversionError(RuntimeError):
-    def __init__(self, message: str, returncode: int, stderr: str) -> None:
-        super().__init__(message)
-        self.returncode = returncode
-        self.stderr = stderr
 
 
 _cached_ffmpeg_path: Optional[str] = None
@@ -85,98 +78,3 @@ def get_ffmpeg_version(saved_dir: str = "") -> str:
         return match.group(1) if match else "unknown"
     except Exception:
         return "unknown"
-
-
-def detect_format(filepath: str) -> str:
-    _, ext = os.path.splitext(filepath)
-    return ext.lower().lstrip(".") if ext else "unknown"
-
-
-def cleanup_temp_file(filepath: str) -> None:
-    if not filepath:
-        return
-    try:
-        if os.path.isfile(filepath):
-            os.remove(filepath)
-    except OSError:
-        pass
-
-
-def convert_file(
-    input_file: str,
-    output_file: str,
-    *,
-    output_format: str = "mp3",
-    bitrate: str = "192k",
-    saved_ffmpeg_dir: str = "",
-    on_progress=None,
-    on_log=None,
-) -> None:
-    """Convert input_file to output_format using the located ffmpeg binary."""
-    fmt = output_format.lower().strip(".")
-    if fmt == "mp3":
-        extra = ["-vn", "-acodec", "libmp3lame", "-ab", bitrate]
-    elif fmt == "wav":
-        extra = ["-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2"]
-    elif fmt == "mp4":
-        extra = ["-c:v", "copy", "-c:a", "aac", "-strict", "experimental"]
-    elif fmt == "m4a":
-        extra = ["-vn", "-acodec", "aac", "-ab", bitrate, "-strict", "experimental"]
-    else:
-        raise ValueError(f"Unsupported format: {output_format}")
-
-    _run_conversion(
-        input_file=input_file,
-        output_file=output_file,
-        extra_args=extra,
-        saved_ffmpeg_dir=saved_ffmpeg_dir,
-        on_progress=on_progress,
-        on_log=on_log,
-    )
-
-
-def _run_conversion(
-    *,
-    input_file: str,
-    output_file: str,
-    extra_args: list,
-    saved_ffmpeg_dir: str = "",
-    on_progress=None,
-    on_log=None,
-) -> None:
-    if not os.path.isfile(input_file):
-        raise FileNotFoundError(f"Input file does not exist: {input_file}")
-
-    ffmpeg = get_ffmpeg_path(saved_ffmpeg_dir)
-    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-
-    cmd = [ffmpeg, "-y", "-i", input_file] + extra_args + [output_file]
-    stderr_lines: list[str] = []
-
-    try:
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, encoding="utf-8", errors="replace",
-        )
-        for line in process.stderr:
-            line = line.rstrip()
-            stderr_lines.append(line)
-            if on_log and line:
-                on_log(f"[ffmpeg] {line}")
-            if on_progress and "time=" in line:
-                m = re.search(r"time=(\d+:\d+:\d+\.\d+)", line)
-                if m:
-                    on_progress(0.0, m.group(1))
-        process.wait()
-    except Exception as exc:
-        raise FFmpegConversionError(str(exc), -1, "\n".join(stderr_lines)) from exc
-
-    if process.returncode != 0:
-        raise FFmpegConversionError(
-            f"FFmpeg exited {process.returncode}",
-            process.returncode,
-            "\n".join(stderr_lines),
-        )
-
-    if on_progress:
-        on_progress(100.0, "done")

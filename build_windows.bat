@@ -1,16 +1,16 @@
 @echo off
 :: ─────────────────────────────────────────────────────────────────────────────
-:: build_windows.bat  —  One-click build for YT Batch Downloader on Windows
+:: build_windows.bat  —  One-click build for YT Downloader on Windows
 :: Run from the ytdl_app\ folder:  build_windows.bat
 ::
-:: FFmpeg is NOT bundled. Users install it separately and set the path in
-:: Settings > Tools, or add it to their system PATH.
+:: FFmpeg and Deno are downloaded (checksum-verified) and bundled into the
+:: app, so installed copies work without any extra setup.
 :: ─────────────────────────────────────────────────────────────────────────────
 setlocal EnableDelayedExpansion
 
 echo.
 echo  ╔══════════════════════════════════════════╗
-echo  ║   YT Batch Downloader  —  Windows Build  ║
+echo  ║   YT Downloader 2.0.0  —  Windows Build  ║
 echo  ╚══════════════════════════════════════════╝
 echo.
 
@@ -43,19 +43,18 @@ if errorlevel 1 (
 pip install pyinstaller --quiet
 echo [OK] Dependencies installed.
 
-:: ── Check Node.js ────────────────────────────────────────────────────────────
-node --version >nul 2>&1
+:: ── Bundle FFmpeg + Deno (downloaded from official releases, SHA-256 checked) ──
+echo [..] Fetching FFmpeg and Deno into vendor\ ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fetch_tools.ps1"
 if errorlevel 1 (
-    echo [WARN] Node.js not found — YouTube downloads may fail without it.
-    echo        Install: winget install OpenJS.NodeJS
-) else (
-    for /f "tokens=*" %%v in ('node --version 2^>^&1') do echo [OK] Node.js %%v
+    echo [ERROR] Could not download or verify FFmpeg/Deno. See messages above.
+    pause & exit /b 1
 )
 
 :: ── Clean previous build ─────────────────────────────────────────────────────
 echo [..] Cleaning previous build...
-if exist "dist\YTBatchDownloader" rmdir /s /q "dist\YTBatchDownloader"
-if exist "build\YTBatchDownloader" rmdir /s /q "build\YTBatchDownloader"
+if exist "dist\YTDownloader" rmdir /s /q "dist\YTDownloader"
+if exist "build\YTDownloader" rmdir /s /q "build\YTDownloader"
 
 :: ── Run PyInstaller ──────────────────────────────────────────────────────────
 echo [..] Running PyInstaller...
@@ -68,10 +67,9 @@ if errorlevel 1 (
 echo.
 echo  ╔════════════════════════════════════════════════════════════════╗
 echo  ║  Build complete!                                               ║
-echo  ║  Executable: dist\YTBatchDownloader\YTBatchDownloader.exe     ║
+echo  ║  Executable: dist\YTDownloader\YTDownloader.exe               ║
 echo  ║                                                                ║
-echo  ║  NOTE: Users must install FFmpeg separately.                   ║
-echo  ║  Set the bin folder in the app: Settings ^> Tools              ║
+echo  ║  FFmpeg and Deno are bundled in tools\ — no extra setup.        ║
 echo  ╚════════════════════════════════════════════════════════════════╝
 echo.
 pause

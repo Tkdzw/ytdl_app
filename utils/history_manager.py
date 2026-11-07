@@ -54,11 +54,7 @@ class HistoryManager:
             return self._read()
 
     def get_latest_entry(self, url: str) -> Optional[dict[str, Any]]:
-        """
-        Return the most recent history entry matching *url*, or None.
-        Used by the post-download conversion trigger to look up the
-        saved filepath after a successful download.
-        """
+        """Return the most recent history entry matching *url*, or None."""
         with self._lock:
             records = self._read()
         # Records are stored newest-first; the first match is the latest.
