@@ -16,7 +16,7 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName      "YT Downloader"
-#define AppVersion   "2.0.0"
+#define AppVersion   "2.1.0"
 #define AppPublisher "Asher Naison"
 #define AppExeName   "YTDownloader.exe"
 #define AppURL       "https://github.com/yt-dlp/yt-dlp"

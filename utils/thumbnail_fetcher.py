@@ -15,7 +15,7 @@ from __future__ import annotations
 import io
 import json
 import re
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import urllib.request
 from typing import Callable, Optional
@@ -23,6 +23,9 @@ from typing import Callable, Optional
 from utils.logger import AppLogger
 
 _log = AppLogger.get_logger(__name__)
+
+# At most 4 preview downloads at a time
+_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="Preview")
 
 _THUMB_TEMPLATES = [
     "https://img.youtube.com/vi/{vid}/mqdefault.jpg",   # 320x180, always present
@@ -47,10 +50,14 @@ def fetch_preview_async(
     url: str,
     on_done: Callable[[str, Optional[object]], None],
     size: tuple[int, int] = (96, 54),
+    want_title: bool = True,
 ) -> None:
     """
     Fetch (title, PIL image) for a YouTube *url* in the background and call
-    ``on_done(title, image)``. Either value may be empty/None.
+    ``on_done(title, image)``. Either value may be empty/None. Pass
+    ``want_title=False`` when the title is already known (playlist entries).
+    Runs on a small shared pool, so a 300-video playlist doesn't start 300
+    threads or hit YouTube with 300 requests at once.
     """
     def worker() -> None:
         vid = extract_video_id(url)
@@ -59,8 +66,12 @@ def fetch_preview_async(
             return
         title = ""
         try:
+            if not want_title:
+                raise LookupError("title not needed")
             data = json.loads(_get(_OEMBED + urllib.parse.quote(url, safe="")))
             title = data.get("title") or ""
+        except LookupError:
+            pass
         except Exception as exc:
             _log.debug("oEmbed failed for %s: %s", url, exc)
         image = None
@@ -74,7 +85,7 @@ def fetch_preview_async(
                 continue
         on_done(title, image)
 
-    threading.Thread(target=worker, daemon=True, name="Preview").start()
+    _POOL.submit(worker)
 
 
 def to_ctk_image(pil_image, size: tuple[int, int] = (96, 54)):

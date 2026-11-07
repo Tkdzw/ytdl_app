@@ -27,6 +27,7 @@ DOWNLOADING = "Downloading"
 COMPLETED = "Completed"
 FAILED = "Failed"
 CANCELLED = "Cancelled"
+CHECKING = "Checking"       # playlist link being expanded; never picked by the worker
 
 FINISHED_STATES = (COMPLETED, FAILED, CANCELLED)
 
@@ -37,6 +38,10 @@ class QueueItem:
     request: DownloadRequest
     status: str = READY
     title: str = ""                 # filled from oEmbed / yt-dlp as it becomes known
+    group: str = ""                 # playlist name when the item came from a playlist
+    group_pos: tuple = ()           # (position, total) within that playlist
+    sub_index: int = 0              # an un-expanded playlist: video n of m now downloading
+    sub_count: int = 0
     duration: Optional[float] = None
     percent: float = 0.0
     speed: str = ""
@@ -77,7 +82,7 @@ class DownloadQueue:
 
     def stats(self) -> dict[str, int]:
         with self._lock:
-            counts = {s: 0 for s in (READY, DOWNLOADING, COMPLETED, FAILED, CANCELLED)}
+            counts = {s: 0 for s in (READY, DOWNLOADING, COMPLETED, FAILED, CANCELLED, CHECKING)}
             for i in self._items:
                 counts[i.status] += 1
             counts["total"] = len(self._items)
@@ -87,13 +92,39 @@ class DownloadQueue:
         with self._lock:
             return any(i.status == READY for i in self._items)
 
+    def has_pending_checks(self) -> bool:
+        with self._lock:
+            return any(i.status == CHECKING for i in self._items)
+
     # ── Editing ───────────────────────────────────────────────────────────────
 
-    def add(self, request: DownloadRequest, title: str = "") -> QueueItem:
+    def add(self, request: DownloadRequest, title: str = "", status: str = READY) -> QueueItem:
         with self._lock:
-            item = QueueItem(id=next(self._ids), request=request, title=title)
+            item = QueueItem(id=next(self._ids), request=request, title=title, status=status)
             self._items.append(item)
             return item
+
+    def replace(self, item_id: int, new_items: list[dict]) -> list[QueueItem]:
+        """
+        Swap a placeholder row (a playlist being read) for one row per video,
+        in the same place in the list. *new_items* are dicts with keys
+        request, title, duration, group, group_pos.
+        """
+        with self._lock:
+            old = self.get(item_id)
+            if old is None:            # removed while it was being read
+                return []
+            pos = self._items.index(old)
+            created = [QueueItem(id=next(self._ids), **spec) for spec in new_items]
+            self._items[pos:pos + 1] = created
+            return created
+
+    def mark_ready(self, item_id: int) -> None:
+        """A playlist that couldn't be expanded: download the link as-is."""
+        with self._lock:
+            item = self.get(item_id)
+            if item and item.status == CHECKING:
+                item.status = READY
 
     def remove(self, item_id: int) -> bool:
         """Remove a row. A row that is downloading is cancelled first and
@@ -144,6 +175,7 @@ class DownloadQueue:
         item.percent = 0.0
         item.speed = item.eta = item.stage = ""
         item.eta_seconds = None
+        item.sub_index = item.sub_count = 0
         item.error = item.hint = item.error_detail = ""
         item.cancel_requested = item.remove_when_cancelled = False
 
@@ -164,7 +196,9 @@ class DownloadQueue:
             item.finished_at = time.monotonic()
             item.speed = item.eta = item.stage = ""
             item.eta_seconds = None
-            if result.title and result.title != item.request.url:
+            # keep a title we already have (playlist listing / preview);
+            # only fill it in when it was still unknown
+            if result.title and result.title != item.request.url and not item.title:
                 item.title = result.title
             if result.success:
                 item.status = COMPLETED
@@ -235,8 +269,12 @@ class QueueWorker(threading.Thread):
                 item.percent = data.percent
                 item.speed, item.eta = data.speed, data.eta
                 item.eta_seconds = data.eta_seconds
+                if data.playlist_count:
+                    item.sub_index, item.sub_count = data.playlist_index, data.playlist_count
+                    if data.playlist_title and not item.group:
+                        item.group = data.playlist_title
                 item.stage = "processing" if data.status == "finished" else ""
-                if data.title and not item.title:
+                if data.title and not item.title and not data.playlist_count:
                     item.title = data.title
                 if data.duration and not item.duration:
                     item.duration = data.duration

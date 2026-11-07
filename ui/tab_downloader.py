@@ -18,12 +18,18 @@ import customtkinter as ctk
 
 from ui import theme
 
+import dataclasses
+import threading
+
 from engine.download_queue import (
-    CANCELLED, COMPLETED, DOWNLOADING, FAILED, READY,
+    CANCELLED, CHECKING, COMPLETED, DOWNLOADING, FAILED, READY,
     DownloadQueue, QueueItem, QueueWorker,
 )
+from engine.playlist import (
+    PlaylistInfo, is_video_in_playlist, looks_like_playlist, playlist_url_for, probe_playlist,
+)
 from engine.downloader import DownloadRequest, DownloadResult, ProgressData, _DEFAULT_OUTPUT_DIR
-from ui.dialogs import FormatDialog
+from ui.dialogs import FormatDialog, PlaylistChoiceDialog
 from ui.queue_list import QueueList
 from utils.history_manager import HistoryManager
 from utils.logger import AppLogger
@@ -73,6 +79,7 @@ class DownloaderTab(ctk.CTkFrame):
         self._user_stopped = False
         self._run_ids: set[int] = set()       # items processed in the current run
         self._details_open = False
+        self._start_requested = False         # Start pressed; begin as soon as playlists are read
 
         self._build()
         self._bind_keys()
@@ -370,13 +377,31 @@ class DownloaderTab(ctk.CTkFrame):
         for r in invalid:
             self._log_ui(f"⚠ Skipped (not a web link): {r.url}")
         added = 0
+        self._remembered_choice: Optional[str] = None   # "same for the rest of this paste"
+        mixed = [r.url for r in valid if is_video_in_playlist(r.url)]
         for r in valid:
-            request = self._build_request(r.url)
+            url, no_playlist = r.url, False
+            if is_video_in_playlist(url):
+                mixed.remove(url)
+                choice = self._remembered_choice or self._ask_playlist_choice(url, len(mixed))
+                if choice is None:
+                    self._log_ui(f"⏭ Skipped: {url}")
+                    continue
+                if choice == "playlist":
+                    url = playlist_url_for(url)
+                else:
+                    no_playlist = True
+            request = self._build_request(url)
             if request is None:
-                self._log_ui(f"⏭ Skipped (no format chosen): {r.url}")
+                self._log_ui(f"⏭ Skipped (no format chosen): {url}")
                 continue
-            item = self._queue.add(request)
-            self._fetch_preview(item)
+            if no_playlist:
+                request.no_playlist = True
+            if looks_like_playlist(url):
+                self._add_playlist(request)
+            else:
+                item = self._queue.add(request)
+                self._fetch_preview(item)
             added += 1
         # keep only the lines that weren't added (invalid ones) so the user can fix them
         self._url_box.delete("1.0", "end")
@@ -385,6 +410,77 @@ class DownloaderTab(ctk.CTkFrame):
         self._validate_urls_live()
         self._sync_list()
         return added
+
+    def _ask_playlist_choice(self, url: str, remaining: int) -> Optional[str]:
+        dlg = PlaylistChoiceDialog(self.winfo_toplevel(), url, remaining)
+        self.wait_window(dlg)
+        if dlg.apply_to_all and dlg.choice:
+            self._remembered_choice = dlg.choice
+        return dlg.choice
+
+    # ── Playlists ─────────────────────────────────────────────────────────────
+
+    _CONFIRM_ABOVE = 150   # ask before adding very long playlists / channels
+
+    def _add_playlist(self, request: DownloadRequest) -> None:
+        """Add a placeholder row, then list the playlist's videos in the
+        background and replace the placeholder with one row per video."""
+        item = self._queue.add(request, title="Playlist", status=CHECKING)
+        self._log_ui(f"… Reading playlist: {request.url}")
+
+        def work() -> None:
+            info = probe_playlist(request.url, proxy=request.proxy_url)
+            try:
+                self.after(0, self._apply_playlist, item.id, request, info)
+            except Exception:
+                pass   # window closed
+
+        threading.Thread(target=work, daemon=True, name="PlaylistProbe").start()
+
+    def _apply_playlist(self, item_id: int, base: DownloadRequest,
+                        info: Optional[PlaylistInfo]) -> None:
+        if self._queue.get(item_id) is None:
+            return                                      # removed meanwhile
+        if info is None:
+            # Couldn't list it (unknown site, private, network): download the
+            # link as one item — the row still shows "Video n of m" progress.
+            self._queue.mark_ready(item_id)
+            self._log_ui(f"⚠ Couldn't list the videos in {base.url}; downloading it as one item.")
+        else:
+            count = len(info.entries)
+            if count > self._CONFIRM_ABOVE:
+                from tkinter import messagebox
+                if not messagebox.askyesno(
+                    "Large playlist",
+                    f"“{info.title}” has {count} videos.\n\nAdd all of them to the list?",
+                    parent=self.winfo_toplevel()):
+                    self._queue.remove(item_id)
+                    self._log_ui(f"⏭ Not added: {info.title} ({count} videos)")
+                    self._sync_list()
+                    self._after_playlist_read()
+                    return
+            specs = [{
+                "request": dataclasses.replace(base, url=e.url, no_playlist=True),
+                "title": e.title,
+                "duration": e.duration,
+                "group": info.title,
+                "group_pos": (n, count),
+            } for n, e in enumerate(info.entries, start=1)]
+            for new in self._queue.replace(item_id, specs):
+                self._fetch_preview(new, want_title=not new.title)
+            skipped = f" ({info.skipped} private/deleted skipped)" if info.skipped else ""
+            self._log_ui(f"✓ Added {count} videos from “{info.title}”{skipped}")
+        self._sync_list()
+        self._after_playlist_read()
+
+    def _after_playlist_read(self) -> None:
+        """If Start was pressed while playlists were being read, begin now."""
+        if self._start_requested and not self._queue.has_pending_checks():
+            if self._queue.has_work():
+                self._ensure_worker()
+            elif not self._is_running():
+                self._start_requested = False
+                self._overall_label.configure(text="Nothing to download.", text_color=_WARN)
 
     def _build_request(self, url: str) -> Optional[DownloadRequest]:
         output_dir = self._outdir_var.get().strip() or _DEFAULT_OUTPUT_DIR
@@ -423,10 +519,13 @@ class DownloaderTab(ctk.CTkFrame):
         self.wait_window(dlg)
         return dlg.chosen_format
 
-    def _fetch_preview(self, item: QueueItem) -> None:
+    def _fetch_preview(self, item: QueueItem, want_title: bool = True) -> None:
         def done(title: str, pil_image) -> None:
-            self.after(0, self._apply_preview, item.id, title, pil_image)
-        fetch_preview_async(item.request.url, done)
+            try:
+                self.after(0, self._apply_preview, item.id, title, pil_image)
+            except Exception:
+                pass   # window closed
+        fetch_preview_async(item.request.url, done, want_title=want_title)
 
     def _apply_preview(self, item_id: int, title: str, pil_image) -> None:
         item = self._queue.get(item_id)
@@ -449,12 +548,19 @@ class DownloaderTab(ctk.CTkFrame):
             self._fix_setup()
             return
         self._add_from_box()
+        if not self._queue.has_work() and self._queue.has_pending_checks():
+            self._start_requested = True
+            self._overall_label.configure(
+                text="Reading the playlist… downloading starts automatically.",
+                text_color=_INFO)
+            return
         if not self._queue.has_work():
             self._overall_label.configure(
                 text="Paste a link above first." if not self._queue.items()
                 else "Nothing waiting — everything in the list is finished.",
                 text_color=_WARN)
             return
+        self._start_requested = True
         self._ensure_worker()
 
     def _ensure_worker(self) -> None:
@@ -483,6 +589,7 @@ class DownloaderTab(ctk.CTkFrame):
     def _cancel_download(self) -> None:
         if self._worker:
             self._user_stopped = True
+            self._start_requested = False
             self._worker.stop()
             self._log_ui("■ Stopping…")
             self._overall_label.configure(text="Stopping…", text_color=_WARN)
@@ -586,6 +693,12 @@ class DownloaderTab(ctk.CTkFrame):
             # links were added while the last item was finishing
             self._ensure_worker()
             return
+        if not stopped and self._queue.has_pending_checks():
+            # a playlist is still being read; the worker restarts once it is
+            self._sync_list()
+            self._overall_label.configure(text="Reading the playlist…", text_color=_INFO)
+            return
+        self._start_requested = False
         self._sync_list()
         items = [i for i in self._queue.items() if i.id in self._run_ids]
         done = [i for i in items if i.status == COMPLETED]

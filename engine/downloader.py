@@ -65,6 +65,10 @@ class ProgressData:
     title: str = ""
     duration: Optional[float] = None   # seconds, when known
     eta_seconds: Optional[float] = None
+    # Set when one URL downloads several videos (a playlist that wasn't expanded)
+    playlist_index: int = 0
+    playlist_count: int = 0
+    playlist_title: str = ""
 
 
 @dataclass
@@ -86,6 +90,7 @@ class DownloadRequest:
     ffmpeg_location: str = ""        # directory containing ffmpeg binary
     js_runtime_name: str = ""        # "node" | "qjs" | "deno" | "bun"
     js_runtime_path: str = ""        # absolute path to JS runtime binary
+    no_playlist: bool = False        # watch?v=…&list=…: download only the video
 
 
 @dataclass
@@ -214,6 +219,7 @@ class DownloadEngine:
             "fragment_retries": req.max_retries,
             "concurrent_fragment_downloads": req.concurrent_fragments,
             "nooverwrites": req.skip_existing,
+            "noplaylist": req.no_playlist,
             # Tell yt-dlp which YouTube clients to try, in order.
             # This prevents it from defaulting to android_vr which 403s frequently.
             "extractor_args": {
@@ -304,6 +310,8 @@ class DownloadEngine:
         cancel_check: Optional[CancelCheck] = None,
         partials: Optional[set] = None,
     ) -> Callable[[dict], None]:
+        stream_state: dict = {}
+
         def hook(d: dict) -> None:
             # Raising here is yt-dlp's supported way to abort a download.
             if cancel_check and cancel_check():
@@ -314,33 +322,68 @@ class DownloadEngine:
                 return
             info = d.get("info_dict") or {}
             status = d.get("status", "")
-            if status == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                downloaded = d.get("downloaded_bytes", 0)
-                if total:
-                    percent = min(downloaded / total * 100, 100.0)
-                elif d.get("fragment_count"):
-                    percent = min((d.get("fragment_index") or 0) / d["fragment_count"] * 100, 100.0)
-                else:
-                    percent = 0.0
-                on_progress(ProgressData(
-                    status="downloading",
-                    percent=percent,
-                    speed=_fmt_speed(d.get("speed") or 0),
-                    eta=_fmt_eta(d.get("eta")),
-                    filename=d.get("filename", ""),
-                    title=info.get("title") or "",
-                    duration=info.get("duration"),
-                    eta_seconds=d.get("eta"),
-                ))
-            elif status == "finished":
-                on_progress(ProgressData(
-                    status="finished", percent=100.0,
-                    filename=d.get("filename", ""),
-                    title=info.get("title") or "",
-                    duration=info.get("duration"),
-                ))
+            if status not in ("downloading", "finished"):
+                return
+            percent, is_last_stream = _overall_percent(d, info, stream_state)
+            idx = info.get("playlist_index") or 0
+            count = info.get("n_entries") or 0
+            if count > 1 and idx:
+                # one row downloading several videos: spread 0–100 % over them
+                percent = ((idx - 1) + percent / 100) / count * 100
+            finished = status == "finished" and is_last_stream
+            on_progress(ProgressData(
+                status="finished" if finished else "downloading",
+                percent=min(percent, 100.0),
+                speed="" if finished else _fmt_speed(d.get("speed") or 0),
+                eta="" if finished else _fmt_eta(d.get("eta")),
+                filename=d.get("filename", ""),
+                title=info.get("title") or "",
+                duration=info.get("duration"),
+                eta_seconds=None if finished else d.get("eta"),
+                playlist_index=idx if count > 1 else 0,
+                playlist_count=count if count > 1 else 0,
+                playlist_title=(info.get("playlist_title") or info.get("playlist") or "")
+                if count > 1 else "",
+            ))
         return hook
+
+
+# Share of a video's bytes that is the picture (the rest is the audio track).
+# Used to blend the separate video and audio downloads into one smooth bar.
+_VIDEO_SHARE = 90.0
+
+
+def _overall_percent(d: dict, info: dict, state: dict) -> tuple[float, bool]:
+    """
+    Progress (0–100) for the *whole* item, plus whether this is its last stream.
+
+    For best quality, yt-dlp downloads the picture and the sound as two
+    separate files, each reporting 0→100 %. Shown raw, the bar fills twice.
+    Here the picture counts for the first 90 % and the sound for the last 10 %.
+    """
+    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+    if d.get("status") == "finished":
+        p = 100.0
+    elif total:
+        p = min(d.get("downloaded_bytes", 0) / total * 100, 100.0)
+    elif d.get("fragment_count"):
+        p = min((d.get("fragment_index") or 0) / d["fragment_count"] * 100, 100.0)
+    else:
+        p = 0.0
+
+    key = (info.get("id"), info.get("playlist_index"))
+    if state.get("key") != key:            # a new video started
+        state.clear()
+        state["key"] = key
+    vcodec, acodec = info.get("vcodec"), info.get("acodec")
+    video_only = vcodec not in (None, "none") and acodec == "none"
+    audio_only = vcodec == "none" and acodec not in (None, "none")
+    if video_only:
+        state["saw_video"] = True
+        return p * _VIDEO_SHARE / 100, False          # the sound still follows
+    if audio_only and state.get("saw_video"):
+        return _VIDEO_SHARE + p * (100 - _VIDEO_SHARE) / 100, True
+    return p, True                                     # single combined/audio file
 
 
 def _make_pp_hook(cancel_check: Optional[CancelCheck]) -> Callable[[dict], None]:

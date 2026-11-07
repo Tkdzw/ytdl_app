@@ -9,6 +9,27 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 
 ---
 
+## 2.1.0 — 2026-11-08
+
+### Added
+- **Playlists and channels are split into one row per video** when added, so each
+  video has its own progress bar, Stop/Retry buttons and history entry. Rows show
+  "Playlist: name · 3 of 12". The list is read quickly with yt-dlp's flat mode;
+  private/deleted entries are skipped, and playlists with more than 150 videos ask first.
+- **"Just this video or the whole playlist?"** for links like `watch?v=…&list=…`,
+  with "do the same for the other links like this". YouTube Mixes (`list=RD…`) are
+  treated as single videos.
+- Pressing Start while a playlist is still being read starts downloading as soon as it is.
+
+### Fixed
+- **Progress bar jumping back to 0 %**: best-quality downloads fetch the picture and the
+  sound separately; they're now blended into one smooth 0→100 %. A playlist that can't be
+  split (unknown site) shows "Video 3 of 12" and one overall bar instead of restarting.
+- A finished row no longer replaces the title it already had.
+- Previews load four at a time, so long playlists don't open hundreds of connections.
+
+---
+
 ## 2.0.0 — 2026-11-07
 
 A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downloader".**

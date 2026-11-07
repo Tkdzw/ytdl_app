@@ -76,6 +76,71 @@ class FormatDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+# ── Video-in-playlist choice ──────────────────────────────────────────────────
+
+class PlaylistChoiceDialog(ctk.CTkToplevel):
+    """
+    For links like watch?v=…&list=…: download just that video, or the whole
+    playlist? ``choice`` is "video", "playlist" or None (skipped).
+    ``apply_to_all`` is True when the user wants the same answer for the
+    other such links in this paste.
+    """
+
+    def __init__(self, parent: ctk.CTk, url: str, remaining: int = 0) -> None:
+        super().__init__(parent)
+        self.title("Video or playlist?")
+        self.geometry("520x300" if remaining else "520x260")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.choice: Optional[str] = None
+        self._all_var = ctk.BooleanVar(value=False)
+
+        ctk.CTkLabel(self, text="This link is a video inside a playlist",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(22, 4), padx=20, anchor="w")
+        short = url if len(url) <= 70 else url[:67] + "…"
+        ctk.CTkLabel(self, text=short, font=ctk.CTkFont(size=12), text_color=theme.MUTED,
+                     ).pack(padx=20, anchor="w")
+        ctk.CTkLabel(self, text="What would you like to download?", font=ctk.CTkFont(size=13),
+                     ).pack(padx=20, pady=(12, 6), anchor="w")
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=4)
+        ctk.CTkButton(row, text="Just this video", height=40, font=ctk.CTkFont(size=14, weight="bold"),
+                      command=lambda: self._pick("video")).pack(side="left", expand=True, fill="x", padx=(0, 6))
+        ctk.CTkButton(row, text="The whole playlist", height=40, font=ctk.CTkFont(size=14),
+                      fg_color="transparent", text_color=theme.TEXT, border_width=1,
+                      command=lambda: self._pick("playlist")).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+        if remaining:
+            ctk.CTkCheckBox(self, text=f"Do the same for the other {remaining} link(s) like this",
+                            variable=self._all_var, font=ctk.CTkFont(size=12),
+                            ).pack(padx=20, pady=(12, 0), anchor="w")
+        ctk.CTkButton(self, text="Skip this link", width=140, fg_color="transparent",
+                      text_color=theme.MUTED, border_width=1, command=self.destroy,
+                      ).pack(pady=14)
+
+        self.bind("<Escape>", lambda _: self.destroy())
+        self.bind("<Return>", lambda _: self._pick("video"))
+        self.after(50, self._grab)
+
+    def _grab(self) -> None:
+        try:
+            self.lift()
+            self.focus_force()
+            self.grab_set()
+        except Exception:
+            pass
+
+    @property
+    def apply_to_all(self) -> bool:
+        return bool(getattr(self, "_apply_all", False))
+
+    def _pick(self, choice: str) -> None:
+        self.choice = choice
+        self._apply_all = self._all_var.get()
+        self.destroy()
+
+
 # ── About dialog ──────────────────────────────────────────────────────────────
 
 class AboutDialog(ctk.CTkToplevel):

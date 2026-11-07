@@ -9,8 +9,8 @@ see CHANGELOG.md.
 
 APP_NAME = "YT Downloader"
 APP_ID = "YTDownloader"                  # file/exe-safe name
-VERSION = "2.0.0"                        # semantic versioning: MAJOR.MINOR.PATCH
-RELEASE_DATE = "2026-11-07"
+VERSION = "2.1.0"                        # semantic versioning: MAJOR.MINOR.PATCH
+RELEASE_DATE = "2026-11-08"
 DEVELOPER = "Asher Naison"
 COPYRIGHT = f"© 2026 {DEVELOPER}"
 DESCRIPTION = "Download videos and music from YouTube and other sites."
@@ -18,6 +18,7 @@ CREDITS = "Built with yt-dlp, FFmpeg, Deno and CustomTkinter."
 
 # Short highlights for the About window's "What's new" (full list: CHANGELOG.md)
 WHATS_NEW = [
+    "Playlists: each video gets its own row and progress bar (new in 2.1)",
     "New name: YT Downloader",
     "Your downloads now appear as a list on the home screen, with Play, Open folder and Retry",
     "One-click setup installs FFmpeg and Deno for you (already included in the installer)",

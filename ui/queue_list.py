@@ -20,11 +20,12 @@ import customtkinter as ctk
 from ui import theme
 
 from engine.download_queue import (
-    CANCELLED, COMPLETED, DOWNLOADING, FAILED, READY, QueueItem,
+    CANCELLED, CHECKING, COMPLETED, DOWNLOADING, FAILED, READY, QueueItem,
 )
 
 _STATUS_STYLE = {
     READY:       ("Waiting",          theme.MUTED),
+    CHECKING:    ("Reading playlist…", theme.INFO),
     DOWNLOADING: ("Downloading",      theme.INFO),
     COMPLETED:   ("✓ Done",           theme.OK),
     FAILED:      ("✗ Failed",         theme.BAD),
@@ -52,6 +53,10 @@ def describe_request(item: QueueItem) -> str:
         parts = [f"{r.video_format.upper()} · {q}"]
     if item.duration:
         parts.append(fmt_duration(item.duration))
+    if item.group:
+        where = f" · {item.group_pos[0]} of {item.group_pos[1]}" if item.group_pos else ""
+        name = item.group if len(item.group) <= 40 else item.group[:39] + "…"
+        parts.append(f"Playlist: {name}{where}")
     return " · ".join(parts)
 
 
@@ -116,6 +121,9 @@ class _Row(ctk.CTkFrame):
             self._bar.set(1.0)
         elif item.status == DOWNLOADING:
             bits = [f"{item.percent:.0f}%"]
+            if item.sub_count:
+                # one row downloading a whole playlist
+                bits.insert(0, f"Video {item.sub_index} of {item.sub_count}")
             if item.speed and item.speed != "—":
                 bits.append(item.speed)
             if item.eta and item.eta != "—":
@@ -145,6 +153,7 @@ class _Row(ctk.CTkFrame):
     # Which buttons each state shows (button keys, left to right)
     _ACTIONS = {
         READY:       ["remove_text"],
+        CHECKING:    ["remove_text"],
         DOWNLOADING: ["cancel"],
         COMPLETED:   ["play", "open", "remove"],
         FAILED:      ["retry", "details", "remove"],
