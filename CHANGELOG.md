@@ -9,6 +9,15 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 
 ---
 
+## Unreleased
+
+### Fixed
+- **The chosen video format no longer costs resolution.** Video quality is now
+  ranked ahead of the container's codec preferences (yt-dlp `format_sort`
+  instead of hard filters), so MP4 with a high quality cap no longer falls back
+  to 1080p H.264 when a higher-resolution VP9/AV1 stream exists. MP4 still
+  prefers SDR H.264 + AAC whenever it is available at the chosen resolution.
+
 ## 2.1.0 — 2026-11-08
 
 ### Added
