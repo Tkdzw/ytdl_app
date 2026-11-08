@@ -12,6 +12,10 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 ## Unreleased
 
 ### Fixed
+- **4K and 1440p downloads work again.** The app forced YouTube clients
+  (web, web_safari, ios, mweb) and skipped DASH/HLS; YouTube now requires PO
+  tokens or serves SABR-only streams for those clients, which often left a single
+  360p format. yt-dlp now chooses the clients itself.
 - **The chosen video format no longer costs resolution.** Video quality is now
   ranked ahead of the container's codec preferences (yt-dlp `format_sort`
   instead of hard filters), so MP4 with a high quality cap no longer falls back
@@ -31,6 +35,10 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 - Pressing Start while a playlist is still being read starts downloading as soon as it is.
 
 ### Fixed
+- **4K and 1440p downloads work again.** The app forced YouTube clients
+  (web, web_safari, ios, mweb) and skipped DASH/HLS; YouTube now requires PO
+  tokens or serves SABR-only streams for those clients, which often left a single
+  360p format. yt-dlp now chooses the clients itself.
 - **Progress bar jumping back to 0 %**: best-quality downloads fetch the picture and the
   sound separately; they're now blended into one smooth 0→100 %. A playlist that can't be
   split (unknown site) shows "Video 3 of 12" and one overall bar instead of restarting.
@@ -79,6 +87,10 @@ A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downl
 - The separate **Batch Queue** tab (its job is done by the home-screen list).
 
 ### Fixed
+- **4K and 1440p downloads work again.** The app forced YouTube clients
+  (web, web_safari, ios, mweb) and skipped DASH/HLS; YouTube now requires PO
+  tokens or serves SABR-only streams for those clients, which often left a single
+  360p format. yt-dlp now chooses the clients itself.
 - yt-dlp's built-in Deno support is no longer switched off when no runtime was detected.
 - CustomTkinter redraw errors when list rows or dialogs closed.
 
@@ -107,6 +119,10 @@ A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downl
 ## 1.0.1
 
 ### Fixed
+- **4K and 1440p downloads work again.** The app forced YouTube clients
+  (web, web_safari, ios, mweb) and skipped DASH/HLS; YouTube now requires PO
+  tokens or serves SABR-only streams for those clients, which often left a single
+  360p format. yt-dlp now chooses the clients itself.
 - The YouTube player-client list was passed in a form yt-dlp ignored.
 - History and conversion recorded the pre-processing file name (e.g. `.webm` instead of `.mp3`).
 - Conversion ignored the FFmpeg folder set in Settings.

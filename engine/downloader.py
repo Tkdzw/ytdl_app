@@ -26,17 +26,6 @@ _USER_AGENT = (
     "Chrome/125.0.0.0 Safari/537.36"
 )
 
-# extractor_args instructs yt-dlp which YouTube clients to try, in order.
-# - "web":        most compatible, uses the JS-solved n-param, rarely 403s
-# - "web_safari": Safari variant, good second choice
-# - "ios":        good fallback, no JS needed, handles most age-restricted content
-# - "mweb":       mobile web, light payload
-# Clients that frequently 403 or are being phased out are intentionally omitted:
-#   android_vr, android, android_music, tv_embedded
-# Must be a list of separate names: yt-dlp treats each list element as one
-# client, so a single comma-joined string is rejected as "unsupported client".
-_YT_CLIENTS = ["web", "web_safari", "ios", "mweb"]
-
 # HTTP headers that match a real Chrome browser session
 _CHROME_HEADERS = {
     "User-Agent": _USER_AGENT,
@@ -220,16 +209,12 @@ class DownloadEngine:
             "concurrent_fragment_downloads": req.concurrent_fragments,
             "nooverwrites": req.skip_existing,
             "noplaylist": req.no_playlist,
-            # Tell yt-dlp which YouTube clients to try, in order.
-            # This prevents it from defaulting to android_vr which 403s frequently.
-            "extractor_args": {
-                "youtube": {
-                    "player_client": list(_YT_CLIENTS),
-                    # Skip the dash manifest check — speeds up extraction
-                    # and avoids a second request that can also 403
-                    "skip": ["dash", "hls"],
-                }
-            },
+            # No YouTube "player_client"/"skip" override: yt-dlp picks the
+            # clients that currently work and updates that choice with each
+            # release. A hard-coded list goes stale — YouTube started requiring
+            # PO tokens (mweb) and serving SABR-only streams (ios, web), which
+            # left a single 360p format. Skipping HLS also hides the m3u8
+            # formats that are sometimes the only 1440p/4K source.
         }
 
         if req.rate_limit_kb > 0:
