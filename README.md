@@ -1,6 +1,6 @@
 # YT Downloader
 
-**Version 2.1.0** · by Asher Naison · see [CHANGELOG.md](CHANGELOG.md)
+**Version 2.1.1** · by Asher Naison · see [CHANGELOG.md](CHANGELOG.md)
 
 A desktop app for batch-downloading YouTube videos and audio, built for
 everyday users. Built with Python, CustomTkinter, yt-dlp, FFmpeg and Deno.

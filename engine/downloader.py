@@ -26,17 +26,6 @@ _USER_AGENT = (
     "Chrome/125.0.0.0 Safari/537.36"
 )
 
-# extractor_args instructs yt-dlp which YouTube clients to try, in order.
-# - "web":        most compatible, uses the JS-solved n-param, rarely 403s
-# - "web_safari": Safari variant, good second choice
-# - "ios":        good fallback, no JS needed, handles most age-restricted content
-# - "mweb":       mobile web, light payload
-# Clients that frequently 403 or are being phased out are intentionally omitted:
-#   android_vr, android, android_music, tv_embedded
-# Must be a list of separate names: yt-dlp treats each list element as one
-# client, so a single comma-joined string is rejected as "unsupported client".
-_YT_CLIENTS = ["web", "web_safari", "ios", "mweb"]
-
 # HTTP headers that match a real Chrome browser session
 _CHROME_HEADERS = {
     "User-Agent": _USER_AGENT,
@@ -220,16 +209,12 @@ class DownloadEngine:
             "concurrent_fragment_downloads": req.concurrent_fragments,
             "nooverwrites": req.skip_existing,
             "noplaylist": req.no_playlist,
-            # Tell yt-dlp which YouTube clients to try, in order.
-            # This prevents it from defaulting to android_vr which 403s frequently.
-            "extractor_args": {
-                "youtube": {
-                    "player_client": list(_YT_CLIENTS),
-                    # Skip the dash manifest check — speeds up extraction
-                    # and avoids a second request that can also 403
-                    "skip": ["dash", "hls"],
-                }
-            },
+            # No YouTube "player_client"/"skip" override: yt-dlp picks the
+            # clients that currently work and updates that choice with each
+            # release. A hard-coded list goes stale — YouTube started requiring
+            # PO tokens (mweb) and serving SABR-only streams (ios, web), which
+            # left a single 360p format. Skipping HLS also hides the m3u8
+            # formats that are sometimes the only 1440p/4K source.
         }
 
         if req.rate_limit_kb > 0:
@@ -291,7 +276,8 @@ class DownloadEngine:
         if embed_thumbnail:
             pps.append({"key": "EmbedThumbnail"})
         opts: dict = {
-            "format": _video_format_selector(merge_fmt, quality),
+            "format": _VIDEO_FORMAT,
+            "format_sort": _video_format_sort(merge_fmt, quality),
             "merge_output_format": merge_fmt,
             "postprocessors": pps,
             "writethumbnail": embed_thumbnail,
@@ -413,33 +399,36 @@ def _max_height(quality: str) -> Optional[int]:
     return int(digits) if digits else None
 
 
-def _video_format_selector(container: str, quality: str) -> str:
-    """
-    Build a yt-dlp format string for *container* capped at *quality*.
+_VIDEO_FORMAT = "bv*+ba/b"
 
-    - mp4 with a height cap prefers H.264 + AAC, which plays on practically
-      every device and TV; "best" keeps the highest resolution (may be AV1/VP9).
-    - webm prefers VP9/AV1 + Opus, since H.264/AAC cannot go in a webm file.
+
+def _video_format_sort(container: str, quality: str) -> list[str]:
+    """
+    yt-dlp ``format_sort`` keys for *container* capped at *quality*.
+
+    Resolution is ranked first, so the container never costs quality:
+    ``res:1080`` picks the largest video at or below 1080p, or the closest
+    one above it when nothing smaller exists. Frame rate comes next, and only
+    then the codec preferences, which break ties at the chosen resolution:
+
+    - mp4 prefers SDR H.264 + AAC (plays on practically every device and TV),
+      but takes VP9/AV1 when that is the only way to reach the resolution.
+    - webm prefers the best of AV1/VP9 + Opus, since H.264/AAC cannot go in
+      a webm file.
     - mkv takes whatever is best.
-    Every chain ends in a plain fallback so a download never fails for lack
-    of an exact match.
+    The file is merged into *container* afterwards whichever streams win.
     """
     h = _max_height(quality)
-    cap = f"[height<={h}]" if h else ""
-    if container == "webm":
-        chain = [f"bv{cap}[ext=webm]+ba[ext=webm]", f"bv{cap}+ba", f"b{cap}"]
-    elif container == "mkv":
-        chain = [f"bv{cap}+ba", f"b{cap}"]
-    else:  # mp4
-        chain = [f"bv{cap}[ext=mp4]+ba[ext=m4a]", f"bv{cap}+ba", f"b{cap}"]
-        if h:
-            chain.insert(0, f"bv{cap}[vcodec^=avc1]+ba[ext=m4a]")
-    if h:
-        # Nothing at or below the cap: take the smallest larger video
-        # (the closest match) rather than failing.
-        chain.append("wv+ba")
-    chain.append("bv*+ba/b")
-    return "/".join(chain)
+    keys = [f"res:{h}" if h else "res"]
+    if container == "mp4":
+        # SDR before frame rate: an HDR stream looks washed out on the
+        # ordinary screens mp4 is chosen for.
+        keys += ["hdr:sdr", "fps", "vcodec:h264", "acodec:aac"]
+    elif container == "webm":
+        keys += ["fps", "vcodec", "acodec:opus"]
+    else:
+        keys += ["fps"]
+    return keys
 
 
 # ── JS runtimes param builder ─────────────────────────────────────────────────

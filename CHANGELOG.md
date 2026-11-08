@@ -9,6 +9,19 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 
 ---
 
+## 2.1.1 — 2026-11-08
+
+### Fixed
+- **4K and 1440p downloads work again.** The app forced YouTube clients
+  (web, web_safari, ios, mweb) and skipped DASH/HLS; YouTube now requires PO
+  tokens or serves SABR-only streams for those clients, which often left a single
+  360p format. yt-dlp now chooses the clients itself.
+- **The chosen video format no longer costs resolution.** Video quality is now
+  ranked ahead of the container's codec preferences (yt-dlp `format_sort`
+  instead of hard filters), so MP4 with a high quality cap no longer falls back
+  to 1080p H.264 when a higher-resolution VP9/AV1 stream exists. MP4 still
+  prefers SDR H.264 + AAC whenever it is available at the chosen resolution.
+
 ## 2.1.0 — 2026-11-08
 
 ### Added
