@@ -161,11 +161,33 @@ class DownloadEngine:
             return bool(cancel_check and cancel_check())
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(request.url, download=True)
-                if info:
-                    title = info.get("title", request.url)
-                    filepaths = _final_filepaths(info, ydl)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(request.url, download=True)
+                    if info:
+                        title = info.get("title", request.url)
+                        filepaths = _final_filepaths(info, ydl)
+            except _PlaylistNotMedia as pl:
+                # The site's "mp4" link served an HLS playlist. Fetch it again
+                # as a stream; yt-dlp's generic extractor spots #EXTM3U itself.
+                _remove_file(pl.filepath)
+                if on_log:
+                    on_log("[info] Link served an HLS playlist, not a video file; "
+                           "retrying as a stream")
+                title = pl.title or title
+                retry_opts = dict(ydl_opts)
+                retry_opts["http_headers"] = {**_CHROME_HEADERS, **pl.headers}
+                safe_title = (title.replace("%", "%%").replace("/", "_")
+                              .replace("\\", "_"))
+                retry_opts["outtmpl"] = os.path.join(
+                    request.output_dir, safe_title + ".%(ext)s")
+                with yt_dlp.YoutubeDL(retry_opts) as ydl:
+                    # extra_info only fills keys the extractor left unset,
+                    # so this restores the page's thumbnail for embedding.
+                    extra = {"thumbnail": pl.thumbnail} if pl.thumbnail else {}
+                    info = ydl.extract_info(pl.url, download=True, extra_info=extra)
+                    if info:
+                        filepaths = _final_filepaths(info, ydl)
             return DownloadResult(url=request.url, title=title,
                                   filepath=filepaths[0] if filepaths else "",
                                   success=True, filepaths=filepaths)
@@ -304,10 +326,12 @@ class DownloadEngine:
                 raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
             if partials is not None and d.get("tmpfilename"):
                 partials.add(d["tmpfilename"])
-            if on_progress is None:
-                return
             info = d.get("info_dict") or {}
             status = d.get("status", "")
+            if status == "finished":
+                _check_not_playlist(d.get("filename", ""), info)
+            if on_progress is None:
+                return
             if status not in ("downloading", "finished"):
                 return
             percent, is_last_stream = _overall_percent(d, info, stream_state)
@@ -378,6 +402,56 @@ def _make_pp_hook(cancel_check: Optional[CancelCheck]) -> Callable[[dict], None]
         if cancel_check and cancel_check() and d.get("status") == "started":
             raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
     return hook
+
+
+class _PlaylistNotMedia(Exception):
+    """A plain HTTP download turned out to be an HLS playlist (text), not media."""
+
+    def __init__(self, url: str, filepath: str, title: str, headers: dict,
+                 thumbnail: str = "") -> None:
+        super().__init__(f"{url} is an HLS playlist")
+        self.url = url
+        self.filepath = filepath
+        self.title = title
+        self.headers = headers
+        self.thumbnail = thumbnail
+
+
+def _check_not_playlist(filepath: str, info: dict) -> None:
+    """
+    Raise _PlaylistNotMedia when a direct download saved an m3u8 playlist.
+
+    Some sites link a URL ending in .mp4 that the CDN answers with an HLS
+    master playlist. yt-dlp's generic extractor trusts the extension, saves
+    the ~1 KB playlist as "video.mp4", and post-processing then fails
+    (ffprobe finds no streams -> KeyError 'streams').
+    """
+    if info.get("protocol") not in ("http", "https") or not filepath:
+        return
+    try:
+        if os.path.getsize(filepath) > 1024 * 1024:
+            return
+        with open(filepath, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return
+    if not head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"#EXTM3U"):
+        return
+    headers = dict(info.get("http_headers") or {})
+    page = info.get("webpage_url")
+    if page and "Referer" not in headers:
+        headers["Referer"] = page
+    raise _PlaylistNotMedia(info.get("url") or "", filepath,
+                            info.get("title") or "", headers,
+                            info.get("thumbnail") or "")
+
+
+def _remove_file(path: str) -> None:
+    try:
+        if path and os.path.isfile(path):
+            os.remove(path)
+    except OSError as exc:
+        _log.debug("Could not remove %s: %s", path, exc)
 
 
 def _remove_partials(paths: set) -> None:
