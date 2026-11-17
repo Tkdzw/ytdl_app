@@ -66,6 +66,12 @@ class YTDownloaderApp(ctk.CTk):
             mode,
         )
 
+    # ── Updates ───────────────────────────────────────────────────────────────
+
+    def show_updates(self, release=None) -> None:
+        """Open the "Update YT Downloader" window (About / Settings / sidebar)."""
+        self._main_window.show_updates(release)
+
     # ── Tools ─────────────────────────────────────────────────────────────────
 
     def show_setup(self) -> None:

@@ -251,6 +251,11 @@ class AboutDialog(ctk.CTkToplevel):
             text_color=theme.TEXT, border_width=1, command=self._copy_details)
         self._copy_btn.pack(side="left")
         add_tooltip(self._copy_btn, "Copies the version information — handy when reporting a problem.")
+        if hasattr(parent, "show_updates"):
+            upd = ctk.CTkButton(footer, text="Check for updates", width=150,
+                                fg_color="transparent", text_color=theme.TEXT, border_width=1,
+                                command=lambda: (self.destroy(), parent.show_updates()))
+            upd.pack(side="left", padx=(8, 0))
         ctk.CTkButton(footer, text="Close", width=100, command=self.destroy).pack(side="right")
 
         threading.Thread(target=self._load_versions, daemon=True).start()

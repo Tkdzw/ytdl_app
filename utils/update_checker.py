@@ -19,8 +19,8 @@ _PYPI_URL = "https://pypi.org/pypi/yt-dlp/json"
 def get_installed_version() -> str:
     """Return the installed yt-dlp version string, or 'unknown'."""
     try:
-        import yt_dlp
-        return getattr(yt_dlp, "__version__", "unknown")
+        from yt_dlp.version import __version__
+        return __version__
     except ImportError:
         return "not installed"
 

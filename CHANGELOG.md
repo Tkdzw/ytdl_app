@@ -34,8 +34,21 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
   - the row and the overall status show when downloads are paused because
     YouTube asked the app to slow down.
 
+- **Update the app from inside the app** (`utils/app_updater.py`,
+  `ui/update_dialog.py`). *Settings → Updates → Check for updates* (also in
+  About) looks at the latest GitHub release; when there is a newer version it
+  shows the release notes and an **Update now** button. The installer is
+  downloaded, checked against the SHA-256 GitHub publishes for it (and its
+  size), then run silently; Windows asks for permission, the app closes and
+  reopens on the new version. A quiet check at startup (can be switched off)
+  shows an "Update to X" button in the sidebar. Copies not installed with the
+  installer (running from source) get a link to the download page instead.
+- `installer.iss`: reopen the app after a silent (in-app) update.
+
 ### Fixed
 - Cancelling a download right as it starts no longer leaves a partial file behind.
+- The sidebar no longer always says a yt-dlp update is available: the installed
+  version was read from an attribute that doesn't exist, so it was "unknown".
 
 ## 2.1.1 — 2026-11-08
 

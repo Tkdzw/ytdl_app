@@ -544,6 +544,15 @@ class DownloaderTab(ctk.CTkFrame):
     def _is_running(self) -> bool:
         return bool(self._worker and self._worker.is_alive())
 
+    def running_count(self) -> int:
+        """How many items are downloading right now (for the updater's warning)."""
+        return self._queue.stats()[DOWNLOADING] if self._is_running() else 0
+
+    def stop_all(self) -> None:
+        """Stop every running download (the app is about to close)."""
+        if self._worker:
+            self._worker.stop()
+
     def _start_download(self) -> None:
         if not self._ffmpeg_ok:
             self._fix_setup()

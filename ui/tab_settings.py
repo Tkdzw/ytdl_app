@@ -13,6 +13,7 @@ from typing import Any
 
 import customtkinter as ctk
 
+import app_info
 from engine.rate_guard import MAX_TOTAL_CONNECTIONS
 from ui import theme
 from ui.tooltip import add_tooltip
@@ -35,11 +36,13 @@ class SettingsTab(ctk.CTkFrame):
         master: ctk.CTkBaseClass,
         settings: SettingsManager,
         on_settings_changed: callable | None = None,
+        on_check_updates: callable | None = None,
         **kwargs,
     ) -> None:
         super().__init__(master, fg_color="transparent", **kwargs)
         self._settings = settings
         self._on_changed = on_settings_changed
+        self._on_check_updates = on_check_updates
         self._vars: dict[str, ctk.Variable] = {}
         self._advanced_open = False
         self._build()
@@ -65,6 +68,9 @@ class SettingsTab(ctk.CTkFrame):
 
         self._section(scroll, "🎨  Appearance")
         self._build_appearance_section(scroll)
+
+        self._section(scroll, "🔄  Updates")
+        self._build_updates_section(scroll)
 
         # ── Advanced (collapsed) ──────────────────────────────────────────────
         self._adv_toggle = ctk.CTkButton(
@@ -167,6 +173,21 @@ class SettingsTab(ctk.CTkFrame):
         self._vars["appearance_mode"] = var
         ctk.CTkSegmentedButton(row, values=["System", "Light", "Dark"], variable=var,
                                command=self._apply_theme, font=theme.font(13)).pack(side="left")
+
+    # ── Updates ───────────────────────────────────────────────────────────────
+
+    def _build_updates_section(self, parent: ctk.CTkFrame) -> None:
+        row = self._make_row(parent, f"Version {app_info.VERSION}",
+                             "Downloads the latest version from GitHub and installs it. "
+                             "Your settings and history are kept.")
+        btn = ctk.CTkButton(row, text="Check for updates", width=160, font=theme.font(13),
+                            command=lambda: self._on_check_updates and self._on_check_updates())
+        btn.pack(side="left")
+        add_tooltip(btn, "Looks for a newer version on GitHub and offers to install it.")
+        self._row_checkbox(parent, "auto_check_updates",
+                           "Check for updates when the app starts",
+                           "Quietly looks for a new version at startup and shows an "
+                           "“Update” button in the sidebar when there is one.")
 
     # ── Advanced: performance ─────────────────────────────────────────────────
 

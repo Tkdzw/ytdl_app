@@ -26,6 +26,7 @@ class Sidebar(ctk.CTkFrame):
         master: ctk.CTkBaseClass,
         on_tab_change: Callable[[str], None],
         on_about: Callable[[], None] | None = None,
+        on_app_update: Callable[[object], None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(master, width=190, corner_radius=0, **kwargs)
@@ -33,6 +34,8 @@ class Sidebar(ctk.CTkFrame):
 
         self._on_tab_change = on_tab_change
         self._on_about = on_about
+        self._on_app_update = on_app_update
+        self._app_update_btn: ctk.CTkButton | None = None
         self._buttons: dict[str, ctk.CTkButton] = {}
         self._active_tab: str = NAV_ITEMS[0][1]
         self._update_badge: ctk.CTkLabel | None = None
@@ -78,6 +81,11 @@ class Sidebar(ctk.CTkFrame):
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.pack(side="bottom", fill="x", padx=10, pady=12)
 
+        # Shown only when GitHub has a newer version of the app
+        self._app_update_btn = ctk.CTkButton(
+            bottom, text="", height=32, font=ctk.CTkFont(size=12, weight="bold"))
+        self._app_update_btn_bottom = bottom
+
         self._update_badge = ctk.CTkLabel(
             bottom,
             text="",
@@ -110,6 +118,15 @@ class Sidebar(ctk.CTkFrame):
         """Display a subtle update hint in the sidebar."""
         if self._update_badge:
             self._update_badge.configure(text=f"yt-dlp {latest} available")
+
+    def show_app_update(self, release) -> None:
+        """Show a "Update to X" button that opens the update window."""
+        if self._app_update_btn is None:
+            return
+        self._app_update_btn.configure(
+            text=f"🔄  Update to {release.version}",
+            command=lambda: self._on_app_update and self._on_app_update(release))
+        self._app_update_btn.pack(fill="x", pady=(0, 8), before=self._update_badge)
 
     def select(self, tab: str) -> None:
         """Switch tabs programmatically (keyboard shortcuts)."""

@@ -35,6 +35,7 @@ ytdl_app/
 │   ├── sidebar.py            ← Navigation rail
 │   ├── tab_downloader.py     ← Home screen: links, options, download list, progress
 │   ├── queue_list.py         ← Download list rows with per-item actions
+│   ├── update_dialog.py      ← "Update YT Downloader": notes, download, install
 │   ├── setup_dialog.py       ← "Finish setting up" — installs FFmpeg/Deno via WinGet
 │   ├── dialogs.py            ← Per-video format picker, About
 │   ├── theme.py              ← Light/dark colour tokens (contrast-checked) + CTk overrides
@@ -50,7 +51,8 @@ ytdl_app/
     ├── settings_manager.py   ← JSON-backed settings with defaults + migrations
     ├── url_validator.py      ← URL pre-validation
     ├── thumbnail_fetcher.py  ← Title (oEmbed) + thumbnail previews
-    └── update_checker.py     ← Background yt-dlp version checker
+    ├── update_checker.py     ← Background yt-dlp version checker
+    └── app_updater.py        ← In-app updates from the latest GitHub release
 ```
 
 ---

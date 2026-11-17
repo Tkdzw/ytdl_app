@@ -9,6 +9,7 @@ import customtkinter as ctk
 from ui import theme
 
 from utils.history_manager import HistoryManager
+from utils.logger import AppLogger
 from utils.settings_manager import SettingsManager
 from utils.tool_setup import ToolStatus
 from utils.update_checker import UpdateChecker
@@ -17,6 +18,8 @@ from ui.tab_downloader import DownloaderTab
 from ui.tab_history import HistoryTab
 from ui.tab_settings import SettingsTab
 from ui.dialogs import show_about
+from ui.update_dialog import show_update_dialog
+from utils import app_updater
 
 # Settings whose change means FFmpeg / the JS runtime must be looked up again
 _TOOL_KEYS = {"ffmpeg_bin_dir", "js_runtime_override_path"}
@@ -45,6 +48,8 @@ class MainWindow(ctk.CTkFrame):
 
         self._build()
         self._run_update_check()
+        if self._settings.get("auto_check_updates"):
+            self.after(4000, self._check_app_update)   # after startup settles
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
@@ -53,6 +58,7 @@ class MainWindow(ctk.CTkFrame):
             self,
             on_tab_change=self._switch_tab,
             on_about=self._show_about,
+            on_app_update=lambda release: self.show_updates(release),
         )
         self._sidebar.pack(side="left", fill="y")
 
@@ -79,6 +85,7 @@ class MainWindow(ctk.CTkFrame):
             self._content,
             settings=self._settings,
             on_settings_changed=self._on_settings_changed,
+            on_check_updates=lambda: self.show_updates(),
         )
 
         self._tab_map: dict[str, ctk.CTkFrame] = {
@@ -140,3 +147,30 @@ class MainWindow(ctk.CTkFrame):
                 self.after(0, self._sidebar.show_update_badge, installed, latest)
 
         UpdateChecker(on_result=on_result).check_async()
+
+    # ── App updates (GitHub releases) ─────────────────────────────────────────
+
+    def show_updates(self, release=None) -> None:
+        show_update_dialog(
+            self.winfo_toplevel(), release,
+            busy_check=self._downloader_tab.running_count,
+            before_quit=self._downloader_tab.stop_all,
+        )
+
+    def _check_app_update(self) -> None:
+        """Quiet startup check: a sidebar notice if there's a newer version."""
+        import threading
+
+        def work() -> None:
+            app_updater.cleanup_downloads()      # installer left from the last update
+            try:
+                info = app_updater.check_latest()
+            except app_updater.UpdateError as exc:
+                AppLogger.get_logger(__name__).info("Update check skipped: %s", exc)
+                return
+            if info.is_newer:
+                try:
+                    self.after(0, self._sidebar.show_app_update, info)
+                except Exception:
+                    pass
+        threading.Thread(target=work, daemon=True, name="AppUpdateCheck").start()

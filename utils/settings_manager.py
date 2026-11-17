@@ -31,6 +31,7 @@ DEFAULTS: dict[str, Any] = {
     "max_parallel_videos": 2,       # videos downloading at the same time
     "skip_existing": True,
     "proxy_url": "",
+    "auto_check_updates": True,     # look for a new app version at startup
     # ── User-configurable tool paths (shown in Settings > Tools) ──────────────
     "ffmpeg_bin_dir": "",           # user-supplied FFmpeg folder (blank = auto)
     "js_runtime_override_path": "", # user-supplied JS runtime binary (blank = auto)
