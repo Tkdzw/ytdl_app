@@ -67,6 +67,16 @@ class ReleaseInfo:
     asset_sha256: str = ""    # lowercase hex, "" if GitHub didn't publish one
 
     @property
+    def codename(self) -> str:
+        """Codename from the release title ('v2.4.0 “Goshawk”'), else app_info's list."""
+        m = re.search(r"[“\"']([A-Z][A-Za-z -]{1,30})[”\"']", self.name or "")
+        return m.group(1) if m else app_info.codename_for(self.version)
+
+    @property
+    def display_version(self) -> str:
+        return f"{self.version} “{self.codename}”" if self.codename else self.version
+
+    @property
     def is_newer(self) -> bool:
         return parse_version(self.version) > parse_version(app_info.VERSION)
 

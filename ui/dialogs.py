@@ -167,7 +167,7 @@ class AboutDialog(ctk.CTkToplevel):
         ctk.CTkLabel(titles, text=app_info.APP_NAME, anchor="w",
                      font=ctk.CTkFont(size=22, weight="bold")).pack(fill="x")
         ctk.CTkLabel(titles, anchor="w", text_color=theme.MUTED, font=ctk.CTkFont(size=13),
-                     text=f"Version {app_info.VERSION}  ·  Released {_nice_date(app_info.RELEASE_DATE)}",
+                     text=f"Version {app_info.DISPLAY_VERSION}  ·  Released {_nice_date(app_info.RELEASE_DATE)}",
                      ).pack(fill="x")
         ctk.CTkLabel(titles, anchor="w", font=ctk.CTkFont(size=13),
                      text=f"Developed by {app_info.DEVELOPER}").pack(fill="x")
@@ -178,7 +178,7 @@ class AboutDialog(ctk.CTkToplevel):
         body.pack(fill="both", expand=True, padx=16, pady=(10, 4))
 
         # ── What's new ────────────────────────────────────────────────────────
-        self._heading(body, f"What's new in {app_info.VERSION}")
+        self._heading(body, f"What's new in {app_info.DISPLAY_VERSION}")
         for line in app_info.WHATS_NEW:
             item = ctk.CTkFrame(body, fg_color="transparent")
             item.pack(fill="x", padx=12, pady=1)
@@ -190,7 +190,7 @@ class AboutDialog(ctk.CTkToplevel):
         # ── Details (filled in the background) ────────────────────────────────
         self._heading(body, "Details")
         for name, value in [
-            ("App version", app_info.VERSION),
+            ("App version", app_info.DISPLAY_VERSION),
             ("Build", "Installed app" if getattr(sys, "frozen", False) else "Running from source"),
             ("Windows", _os_version()),
             ("Python", _get_python_version()),
@@ -320,7 +320,7 @@ class AboutDialog(ctk.CTkToplevel):
             self._values[name].configure(text=value)
 
     def _copy_details(self) -> None:
-        lines = [f"{app_info.APP_NAME} {app_info.VERSION} ({app_info.RELEASE_DATE})"]
+        lines = [f"{app_info.APP_NAME} {app_info.DISPLAY_VERSION} ({app_info.RELEASE_DATE})"]
         lines += [f"{name}: {lbl.cget('text')}" for name, lbl in self._values.items()]
         self.clipboard_clear()
         self.clipboard_append("\n".join(lines))

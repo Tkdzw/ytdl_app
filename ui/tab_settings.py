@@ -177,7 +177,7 @@ class SettingsTab(ctk.CTkFrame):
     # ── Updates ───────────────────────────────────────────────────────────────
 
     def _build_updates_section(self, parent: ctk.CTkFrame) -> None:
-        row = self._make_row(parent, f"Version {app_info.VERSION}",
+        row = self._make_row(parent, f"Version {app_info.DISPLAY_VERSION}",
                              "Downloads the latest version from GitHub and installs it. "
                              "Your settings and history are kept.")
         btn = ctk.CTkButton(row, text="Check for updates", width=160, font=theme.font(13),

@@ -119,7 +119,7 @@ class UpdateDialog(ctk.CTkToplevel):
     def _start_check(self) -> None:
         self._hide_middle()
         self._title.configure(text="Checking for updates…")
-        self._sub.configure(text=f"You have version {app_info.VERSION}.", text_color=theme.MUTED)
+        self._sub.configure(text=f"You have version {app_info.DISPLAY_VERSION}.", text_color=theme.MUTED)
         self._set_buttons(("Close", self._close, False))
 
         def work() -> None:
@@ -137,15 +137,15 @@ class UpdateDialog(ctk.CTkToplevel):
         if not info.is_newer:
             self._title.configure(text="✓  You're up to date")
             self._sub.configure(text_color=theme.MUTED, text=(
-                f"Version {app_info.VERSION} is the latest version."))
+                f"Version {app_info.DISPLAY_VERSION} is the latest version."))
             self._set_buttons(("Close", self._close, True))
             return
 
-        self._title.configure(text=f"Version {info.version} is available")
+        self._title.configure(text=f"Version {info.display_version} is available")
         size = f"  ·  {info.asset_size / 2**20:.0f} MB download" if info.asset_size else ""
         when = f"  ·  released {info.published}" if info.published else ""
         self._sub.configure(text_color=theme.MUTED,
-                            text=f"You have version {app_info.VERSION}{when}{size}")
+                            text=f"You have version {app_info.DISPLAY_VERSION}{when}{size}")
         self._notes.configure(state="normal")
         self._notes.delete("1.0", "end")
         self._notes.insert("1.0", _plain_notes(info.notes) or "No release notes.")
@@ -196,7 +196,7 @@ class UpdateDialog(ctk.CTkToplevel):
         self._cancel.clear()
         self._downloading = True
         self._hide_middle()
-        self._title.configure(text=f"Downloading version {info.version}…")
+        self._title.configure(text=f"Downloading version {info.display_version}…")
         self._sub.configure(text_color=theme.MUTED,
                             text="You can keep using the app while this downloads.")
         self._bar.set(0)

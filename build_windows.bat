@@ -10,7 +10,7 @@ setlocal EnableDelayedExpansion
 
 echo.
 echo  ╔══════════════════════════════════════════╗
-echo  ║   YT Downloader 2.2.0  —  Windows Build  ║
+echo  ║   YT Downloader 2.3.0  —  Windows Build  ║
 echo  ╚══════════════════════════════════════════╝
 echo.
 

@@ -58,8 +58,8 @@ class YTDownloaderApp(ctk.CTk):
             self.after(400, self.show_setup)
 
         self.logger.info(
-            "App started v%s | FFmpeg: %s | JS runtime: %s | Theme: %s",
-            app_info.VERSION,
+            "App started v%s (%s) | FFmpeg: %s | JS runtime: %s | Theme: %s",
+            app_info.VERSION, app_info.CODENAME,
             self.tools.ffmpeg_dir or "missing",
             f"{self.tools.js.name} v{self.tools.js.version}"
             if self.tools.js_ok else "none",

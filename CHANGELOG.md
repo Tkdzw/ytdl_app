@@ -4,12 +4,35 @@ All notable changes to YT Downloader. Versions follow
 [Semantic Versioning](https://semver.org/): MAJOR for changes that remove or
 rework features, MINOR for new features, PATCH for fixes.
 
+Each minor release has a codename: a bird, in alphabetical order (patch
+releases keep their minor release's name). The list lives in `app_info.py`
+(`CODENAMES`, next names in `_NEXT_CODENAMES`).
+
 When releasing, update the version in **`app_info.py`** (used by the app and
-the .exe properties) and **`installer.iss`** (`AppVersion`).
+the .exe properties) and **`installer.iss`** (`AppVersion`), add the
+codename to `CODENAMES`, and title the GitHub release `vX.Y.Z “Codename”`.
 
 ---
 
-## 2.2.0 — 2026-11-17
+## 2.3.0 “Falcon” — 2026-11-17
+
+### Added
+- **Update the app from inside the app** (`utils/app_updater.py`,
+  `ui/update_dialog.py`). *Settings → Updates → Check for updates* (also in
+  About) looks at the latest GitHub release; when there is a newer version it
+  shows the release notes and an **Update now** button. The installer is
+  downloaded, checked against the SHA-256 GitHub publishes for it (and its
+  size), then run silently; Windows asks for permission, the app closes and
+  reopens on the new version. A quiet check at startup (can be switched off)
+  shows an "Update to X" button in the sidebar. Copies not installed with the
+  installer (running from source) get a link to the download page instead.
+- `installer.iss`: reopen the app after a silent (in-app) update.
+
+### Fixed
+- The sidebar no longer always says a yt-dlp update is available: the installed
+  version was read from an attribute that doesn't exist, so it was "unknown".
+
+## 2.2.0 “Eagle” — 2026-11-17
 
 ### Added
 - **Faster downloads with several connections per file, like IDM.** YouTube's
@@ -34,23 +57,10 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
   - the row and the overall status show when downloads are paused because
     YouTube asked the app to slow down.
 
-- **Update the app from inside the app** (`utils/app_updater.py`,
-  `ui/update_dialog.py`). *Settings → Updates → Check for updates* (also in
-  About) looks at the latest GitHub release; when there is a newer version it
-  shows the release notes and an **Update now** button. The installer is
-  downloaded, checked against the SHA-256 GitHub publishes for it (and its
-  size), then run silently; Windows asks for permission, the app closes and
-  reopens on the new version. A quiet check at startup (can be switched off)
-  shows an "Update to X" button in the sidebar. Copies not installed with the
-  installer (running from source) get a link to the download page instead.
-- `installer.iss`: reopen the app after a silent (in-app) update.
-
 ### Fixed
 - Cancelling a download right as it starts no longer leaves a partial file behind.
-- The sidebar no longer always says a yt-dlp update is available: the installed
-  version was read from an attribute that doesn't exist, so it was "unknown".
 
-## 2.1.1 — 2026-11-08
+## 2.1.1 “Dunlin” — 2026-11-08
 
 ### Fixed
 - **4K and 1440p downloads work again.** The app forced YouTube clients
@@ -63,7 +73,7 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
   to 1080p H.264 when a higher-resolution VP9/AV1 stream exists. MP4 still
   prefers SDR H.264 + AAC whenever it is available at the chosen resolution.
 
-## 2.1.0 — 2026-11-08
+## 2.1.0 “Dunlin” — 2026-11-08
 
 ### Added
 - **Playlists and channels are split into one row per video** when added, so each
@@ -84,7 +94,7 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 
 ---
 
-## 2.0.0 — 2026-11-07
+## 2.0.0 “Crane” — 2026-11-07
 
 A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downloader".**
 
@@ -129,7 +139,7 @@ A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downl
 
 ---
 
-## 1.1.0
+## 1.1.0 “Bluejay”
 
 ### Added
 - **"Download" and "Quality" choices** on the home screen: Video (MP4) / Audio (MP3), and
@@ -149,7 +159,7 @@ A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downl
 
 ---
 
-## 1.0.1
+## 1.0.1 “Albatross”
 
 ### Fixed
 - The YouTube player-client list was passed in a form yt-dlp ignored.
@@ -160,7 +170,7 @@ A redesign for everyday users. **Renamed from "YT Batch Downloader" to "YT Downl
 
 ---
 
-## 1.0.0
+## 1.0.0 “Albatross”
 
 First release: batch downloads with yt-dlp, video/audio modes, queue and history tabs,
 settings, and a Windows installer.

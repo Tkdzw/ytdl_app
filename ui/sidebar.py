@@ -53,7 +53,8 @@ class Sidebar(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self,
-            text=f"Version {app_info.VERSION}",
+            text=f"Version {app_info.VERSION} · {app_info.CODENAME}"
+            if app_info.CODENAME else f"Version {app_info.VERSION}",
             font=ctk.CTkFont(size=12),
             text_color=theme.MUTED,
         ).pack(padx=12, pady=(0, 20))
