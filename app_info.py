@@ -9,8 +9,8 @@ see CHANGELOG.md.
 
 APP_NAME = "YT Downloader"
 APP_ID = "YTDownloader"                  # file/exe-safe name
-VERSION = "2.1.1"                        # semantic versioning: MAJOR.MINOR.PATCH
-RELEASE_DATE = "2026-11-08"
+VERSION = "2.2.0"                        # semantic versioning: MAJOR.MINOR.PATCH
+RELEASE_DATE = "2026-11-17"
 DEVELOPER = "Asher Naison"
 COPYRIGHT = f"© 2026 {DEVELOPER}"
 DESCRIPTION = "Download videos and music from YouTube and other sites."
@@ -18,6 +18,8 @@ CREDITS = "Built with yt-dlp, FFmpeg, Deno and CustomTkinter."
 
 # Short highlights for the About window's "What's new" (full list: CHANGELOG.md)
 WHATS_NEW = [
+    "Faster downloads: each video downloads over several connections at once (new in 2.2)",
+    "Download several videos at the same time, with automatic slow-down if YouTube says there are too many requests (new in 2.2)",
     "4K and 1440p YouTube downloads work again (2.1.1)",
     "Playlists: each video gets its own row and progress bar (new in 2.1)",
     "New name: YT Downloader",

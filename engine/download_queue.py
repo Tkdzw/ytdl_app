@@ -6,7 +6,9 @@ next "Ready" item whenever it finishes one. That means:
 
 * links added while a batch is running are picked up automatically,
 * a single row can be cancelled or removed without stopping the rest,
-* Cancel stops the current download immediately (within a progress tick).
+* Cancel stops the running downloads immediately (within a progress tick),
+* several items download at once ("Videos at once" setting), throttled by the
+  shared HTTP 429 guard in engine/rate_guard.py.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from engine.downloader import DownloadEngine, DownloadRequest, DownloadResult, ProgressData
+from engine.rate_guard import GUARD, is_429
 from utils.error_messages import friendly_error
 from utils.logger import AppLogger
 
@@ -56,6 +59,7 @@ class QueueItem:
     remove_when_cancelled: bool = False
     started_at: float = 0.0
     finished_at: float = 0.0
+    auto_retries: int = 0           # times re-queued after HTTP 429
 
     @property
     def display_title(self) -> str:
@@ -187,6 +191,7 @@ class DownloadQueue:
                 if item.status == READY:
                     item.status = DOWNLOADING
                     item.cancel_requested = False
+                    item.stage = ""
                     item.started_at = time.monotonic()
                     return item
             return None
@@ -215,6 +220,16 @@ class DownloadQueue:
                 item.error, item.hint = friendly.message, friendly.hint
                 item.error_detail = result.error_message
 
+    def requeue(self, item: QueueItem) -> bool:
+        """Put a running item back as Ready (after an HTTP 429). Returns False
+        if the user cancelled or removed it meanwhile."""
+        with self._lock:
+            if item not in self._items or item.cancel_requested:
+                return False
+            self._reset(item)
+            item.stage = "waiting"
+            return True
+
     def cancel_all_running(self) -> None:
         with self._lock:
             for item in self._items:
@@ -222,10 +237,16 @@ class DownloadQueue:
                     item.cancel_requested = True
 
 
+# Re-queue a video that failed with HTTP 429 this many times before giving up.
+_MAX_AUTO_RETRIES = 2
+
+
 class QueueWorker(threading.Thread):
     """
-    Drains a DownloadQueue one item at a time. All callbacks run on this
-    thread — the UI must marshal them onto the Tk thread with ``after``.
+    Drains a DownloadQueue, running up to ``max_parallel()`` items at once
+    (fewer while the HTTP 429 guard has slowed things down). Callbacks run on
+    background threads — the UI must marshal them onto the Tk thread with
+    ``after``.
     """
 
     def __init__(
@@ -236,6 +257,7 @@ class QueueWorker(threading.Thread):
         on_item_done: Optional[Callable[[QueueItem, DownloadResult], None]] = None,
         on_log: Optional[Callable[[str], None]] = None,
         on_all_done: Optional[Callable[[bool], None]] = None,
+        max_parallel: Callable[[], int] = lambda: 1,
     ) -> None:
         super().__init__(daemon=True, name="QueueWorker")
         self._queue = queue
@@ -244,13 +266,17 @@ class QueueWorker(threading.Thread):
         self._on_item_done = on_item_done
         self._on_log = on_log
         self._on_all_done = on_all_done
+        self._max_parallel = max_parallel
         self._engine = DownloadEngine()
         self._stop_event = threading.Event()
+        self._wake = threading.Event()      # a slot finished
+        self._slots: list[threading.Thread] = []
 
     def stop(self) -> None:
-        """Stop now: cancels the running download; Ready items stay queued."""
+        """Stop now: cancels running downloads; Ready items stay queued."""
         self._stop_event.set()
         self._queue.cancel_all_running()
+        self._wake.set()
 
     @property
     def is_cancelled(self) -> bool:
@@ -258,38 +284,93 @@ class QueueWorker(threading.Thread):
 
     def run(self) -> None:
         while not self._stop_event.is_set():
+            self._slots = [t for t in self._slots if t.is_alive()]
+            allowed = GUARD.videos_allowed(max(1, int(self._max_parallel() or 1)))
+            if len(self._slots) >= allowed:
+                self._wait_for_slot()
+                continue
+            if not self._queue.has_work():
+                if not self._slots:
+                    break
+                self._wait_for_slot()
+                continue
+            # Space out starts and sit out any 429 cool-down before the next one.
+            if not GUARD.wait_turn_to_start(self._stop_event):
+                break
             item = self._queue.take_next()
             if item is None:
-                break
-            if self._on_item_start:
-                self._on_item_start(item)
-            _log.info("Starting #%d: %s [%s]", item.id, item.request.url, item.request.mode)
+                continue
+            t = threading.Thread(target=self._run_item, args=(item,), daemon=True,
+                                 name=f"Download-{item.id}")
+            self._slots.append(t)
+            t.start()
 
-            def progress(data: ProgressData, item: QueueItem = item) -> None:
-                item.percent = data.percent
-                item.speed, item.eta = data.speed, data.eta
-                item.eta_seconds = data.eta_seconds
-                if data.playlist_count:
-                    item.sub_index, item.sub_count = data.playlist_index, data.playlist_count
-                    if data.playlist_title and not item.group:
-                        item.group = data.playlist_title
-                item.stage = "processing" if data.status == "finished" else ""
-                if data.title and not item.title and not data.playlist_count:
-                    item.title = data.title
-                if data.duration and not item.duration:
-                    item.duration = data.duration
-                if self._on_progress:
-                    self._on_progress(item, data)
-
-            result = self._engine.download(
-                item.request,
-                on_progress=progress,
-                on_log=self._on_log,
-                cancel_check=lambda item=item: item.cancel_requested or self._stop_event.is_set(),
-            )
-            self._queue.finish(item, result)
-            if self._on_item_done:
-                self._on_item_done(item, result)
-
+        for t in self._slots:
+            t.join()
         if self._on_all_done:
             self._on_all_done(self._stop_event.is_set())
+
+    def _wait_for_slot(self) -> None:
+        self._wake.wait(0.5)
+        self._wake.clear()
+
+    def _run_item(self, item: QueueItem) -> None:
+        try:
+            self._download(item)
+        except Exception:                       # never leave a row stuck "Downloading"
+            _log.exception("Worker crashed on #%d", item.id)
+            self._queue.finish(item, DownloadResult(
+                url=item.request.url, title="", filepath="", success=False,
+                error_message="Unexpected error in the download worker"))
+            if self._on_item_done:
+                self._on_item_done(item, DownloadResult(
+                    url=item.request.url, title="", filepath="", success=False,
+                    error_message="Unexpected error in the download worker"))
+        finally:
+            self._wake.set()
+
+    def _download(self, item: QueueItem) -> None:
+        if self._on_item_start:
+            self._on_item_start(item)
+        _log.info("Starting #%d: %s [%s]", item.id, item.request.url, item.request.mode)
+
+        def progress(data: ProgressData, item: QueueItem = item) -> None:
+            item.percent = data.percent
+            item.speed, item.eta = data.speed, data.eta
+            item.eta_seconds = data.eta_seconds
+            if data.playlist_count:
+                item.sub_index, item.sub_count = data.playlist_index, data.playlist_count
+                if data.playlist_title and not item.group:
+                    item.group = data.playlist_title
+            item.stage = "processing" if data.status == "finished" else ""
+            if data.title and not item.title and not data.playlist_count:
+                item.title = data.title
+            if data.duration and not item.duration:
+                item.duration = data.duration
+            if self._on_progress:
+                self._on_progress(item, data)
+
+        result = self._engine.download(
+            item.request,
+            on_progress=progress,
+            on_log=self._on_log,
+            cancel_check=lambda item=item: item.cancel_requested or self._stop_event.is_set(),
+        )
+
+        if (not result.success and not result.cancelled and is_429(result.error_message)
+                and item.auto_retries < _MAX_AUTO_RETRIES and not self._stop_event.is_set()):
+            running = sum(1 for t in self._slots if t.is_alive())
+            wait = GUARD.note_429(running_videos=running)
+            item.auto_retries += 1
+            if self._queue.requeue(item):
+                if self._on_log:
+                    self._on_log(
+                        f"⏸ YouTube says too many requests (HTTP 429). Pausing {wait:.0f}s, "
+                        f"then retrying with fewer downloads at once: {item.display_title}")
+                if self._on_item_start:
+                    self._on_item_start(item)      # refresh the row ("Ready" again)
+                return
+
+        self._queue.finish(item, result)
+        if self._on_item_done:
+            self._on_item_done(item, result)

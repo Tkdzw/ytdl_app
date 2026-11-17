@@ -19,6 +19,7 @@ import customtkinter as ctk
 
 from ui import theme
 
+from engine.rate_guard import GUARD
 from engine.download_queue import (
     CANCELLED, CHECKING, COMPLETED, DOWNLOADING, FAILED, READY, QueueItem,
 )
@@ -128,8 +129,15 @@ class _Row(ctk.CTkFrame):
                 bits.append(item.speed)
             if item.eta and item.eta != "—":
                 bits.append(f"{item.eta} left")
+            if GUARD.cooldown_left() > 0:
+                bits.append("paused: YouTube asked us to slow down")
             self._detail.configure(text="   ".join(bits), text_color=theme.MUTED)
             self._bar.set(item.percent / 100)
+        elif item.status == READY and item.stage == "waiting":
+            self._detail.configure(
+                text="YouTube asked us to slow down (too many requests). "
+                     "This will retry automatically.",
+                text_color=theme.WARN)
         elif item.status == FAILED:
             self._detail.configure(text=f"{item.error}\n{item.hint}".strip(),
                                    text_color=theme.BAD)

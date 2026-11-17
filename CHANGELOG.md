@@ -9,6 +9,34 @@ the .exe properties) and **`installer.iss`** (`AppVersion`).
 
 ---
 
+## 2.2.0 — 2026-11-17
+
+### Added
+- **Faster downloads with several connections per file, like IDM.** YouTube's
+  regular video and audio streams used to come down over one connection. They
+  are now split into byte ranges, fetched in parallel, and written straight
+  into one file (`engine/parallel_http.py`). The "Parallel connections"
+  setting controls how many connections are used (1 turns this off). About
+  2.5× faster in testing (6 → 15 MiB/s with 8 connections). It falls back to a
+  single connection when a server doesn't support ranges, when a speed limit
+  is set, or if a parallel download fails.
+- **Several videos download at the same time.** New setting *Videos at once*
+  (1–5, default 2). The download list shows each running video's progress, and
+  the overall bar and time-left estimate account for parallel downloads.
+- **Protection against "HTTP 429 Too Many Requests"** (`engine/rate_guard.py`):
+  - all downloads share at most 16 connections in total;
+  - video starts are spaced out instead of all at once;
+  - on a 429 every download pauses (honouring the server's Retry-After,
+    otherwise 30 s, doubling up to 5 min), and the connection limit and number
+    of videos at once are halved, recovering step by step after a quiet minute;
+  - a video that fails with 429 goes back in the queue automatically (up to
+    twice) instead of being marked Failed;
+  - the row and the overall status show when downloads are paused because
+    YouTube asked the app to slow down.
+
+### Fixed
+- Cancelling a download right as it starts no longer leaves a partial file behind.
+
 ## 2.1.1 — 2026-11-08
 
 ### Fixed

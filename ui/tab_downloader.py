@@ -21,6 +21,7 @@ from ui import theme
 import dataclasses
 import threading
 
+from engine.rate_guard import GUARD
 from engine.download_queue import (
     CANCELLED, CHECKING, COMPLETED, DOWNLOADING, FAILED, READY,
     DownloadQueue, QueueItem, QueueWorker,
@@ -582,6 +583,8 @@ class DownloaderTab(ctk.CTkFrame):
             on_item_done=lambda item, res: self.after(0, self._apply_item_done, item, res),
             on_log=lambda msg: self.after(0, self._log_ui, msg),
             on_all_done=lambda stopped: self.after(0, self._apply_all_done, stopped),
+            # read live, so changing the setting mid-batch takes effect
+            max_parallel=lambda: int(self._settings.get("max_parallel_videos") or 1),
         )
         self._set_running(True)
         self._worker.start()
@@ -737,27 +740,39 @@ class DownloaderTab(ctk.CTkFrame):
             return
         total = len(items)
         finished = sum(1 for i in items if i.status in (COMPLETED, FAILED, CANCELLED))
-        current = next((i for i in items if i.status == DOWNLOADING), None)
-        frac = (finished + (current.percent / 100 if current else 0)) / total
+        running = [i for i in items if i.status == DOWNLOADING]
+        frac = (finished + sum(i.percent / 100 for i in running)) / total
         self._overall_bar.set(frac)
         text = f"{finished} of {total} done"
-        eta = self._estimate_remaining(items, current)
-        if eta:
-            text += f"  ·  {eta}"
+        if len(running) > 1:
+            text += f"  ·  {len(running)} downloading"
+        cooldown = GUARD.cooldown_left()
+        if cooldown > 0:
+            text += f"  ·  paused {cooldown:.0f}s (YouTube asked us to slow down)"
+        else:
+            eta = self._estimate_remaining(items, running,
+                                           int(self._settings.get("max_parallel_videos") or 1))
+            if eta:
+                text += f"  ·  {eta}"
         self._overall_label.configure(text=text, text_color=theme.TEXT)
 
     @staticmethod
-    def _estimate_remaining(items: list[QueueItem], current: Optional[QueueItem]) -> str:
+    def _estimate_remaining(items: list[QueueItem], running: list[QueueItem],
+                            parallel: int) -> str:
         durations = [i.finished_at - i.started_at for i in items
                      if i.status == COMPLETED and i.finished_at > i.started_at]
         waiting = sum(1 for i in items if i.status == READY)
-        current_left = current.eta_seconds if current and current.eta_seconds else None
+        lefts = [i.eta_seconds for i in running if i.eta_seconds]
+        parallel = max(1, parallel)
         if durations:
             avg = sum(durations) / len(durations)
-            seconds = avg * waiting + (current_left if current_left is not None
-                                       else avg * (1 - (current.percent / 100 if current else 1)))
-        elif waiting == 0 and current_left is not None:
-            seconds = current_left
+            running_left = max(
+                [i.eta_seconds if i.eta_seconds else avg * (1 - i.percent / 100)
+                 for i in running] or [0])
+            # waiting items share the download slots
+            seconds = running_left + avg * waiting / parallel
+        elif waiting == 0 and lefts and len(lefts) == len(running):
+            seconds = max(lefts)
         else:
             return ""   # not enough information yet
         if seconds < 60:

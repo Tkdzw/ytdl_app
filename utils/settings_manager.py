@@ -27,7 +27,8 @@ DEFAULTS: dict[str, Any] = {
     "write_subtitles": False,
     "subtitle_lang": "en",
     "rate_limit_kb": 0,
-    "concurrent_fragments": 4,
+    "concurrent_fragments": 4,      # connections per file
+    "max_parallel_videos": 2,       # videos downloading at the same time
     "skip_existing": True,
     "proxy_url": "",
     # ── User-configurable tool paths (shown in Settings > Tools) ──────────────

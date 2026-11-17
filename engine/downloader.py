@@ -12,10 +12,15 @@ from typing import Callable, Optional
 
 import yt_dlp
 
+from engine import parallel_http
 from utils.logger import AppLogger
 from utils.tool_setup import find_ffmpeg_dir
 
 _log = AppLogger.get_logger(__name__)
+
+# Plain HTTP(S) streams (most YouTube formats) download over several
+# connections at once, like a download manager. See engine/parallel_http.py.
+parallel_http.install()
 
 _DEFAULT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "YTBatchDL")
 
@@ -228,6 +233,8 @@ class DownloadEngine:
             "postprocessor_hooks": [_make_pp_hook(cancel_check)],
             "retries": req.max_retries,
             "fragment_retries": req.max_retries,
+            # Connections per file: HLS/DASH fragments, and byte ranges of
+            # plain HTTP files (engine/parallel_http.py).
             "concurrent_fragment_downloads": req.concurrent_fragments,
             "nooverwrites": req.skip_existing,
             "noplaylist": req.no_playlist,
@@ -321,11 +328,12 @@ class DownloadEngine:
         stream_state: dict = {}
 
         def hook(d: dict) -> None:
+            # Record the temp file first so a cancel on this tick cleans it up.
+            if partials is not None and d.get("tmpfilename"):
+                partials.add(d["tmpfilename"])
             # Raising here is yt-dlp's supported way to abort a download.
             if cancel_check and cancel_check():
                 raise yt_dlp.utils.DownloadCancelled("Cancelled by user")
-            if partials is not None and d.get("tmpfilename"):
-                partials.add(d["tmpfilename"])
             info = d.get("info_dict") or {}
             status = d.get("status", "")
             if status == "finished":

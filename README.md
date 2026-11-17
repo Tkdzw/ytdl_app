@@ -1,6 +1,6 @@
 # YT Downloader
 
-**Version 2.1.1** · by Asher Naison · see [CHANGELOG.md](CHANGELOG.md)
+**Version 2.2.0** · by Asher Naison · see [CHANGELOG.md](CHANGELOG.md)
 
 A desktop app for batch-downloading YouTube videos and audio, built for
 everyday users. Built with Python, CustomTkinter, yt-dlp, FFmpeg and Deno.
@@ -25,7 +25,9 @@ ytdl_app/
 │
 ├── engine/
 │   ├── downloader.py         ← yt-dlp wrapper (format choice, cancel, progress)
-│   ├── download_queue.py     ← Thread-safe queue + worker that drains it
+│   ├── parallel_http.py      ← Multi-connection (IDM-style) HTTP downloader
+│   ├── rate_guard.py         ← Shared HTTP 429 guard: connection cap, pauses, slow-down
+│   ├── download_queue.py     ← Thread-safe queue + workers (several videos at once)
 │   └── playlist.py           ← Detect + list playlist/channel links (yt-dlp flat mode)
 │
 ├── ui/

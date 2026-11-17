@@ -13,6 +13,7 @@ from typing import Any
 
 import customtkinter as ctk
 
+from engine.rate_guard import MAX_TOTAL_CONNECTIONS
 from ui import theme
 from ui.tooltip import add_tooltip
 from utils.logger import AppLogger
@@ -173,8 +174,14 @@ class SettingsTab(ctk.CTkFrame):
         self._slider(parent, "max_retries", "Retries if a download fails:", 0, 10,
                      "How many times to try again after a network hiccup before giving up.")
         self._slider(parent, "concurrent_fragments", "Parallel connections:", 1, 16,
-                     "How many pieces of a video download at once. Higher can be faster on "
-                     "good connections; lower is gentler on slow ones.")
+                     "How many connections each video downloads over at once, like a "
+                     "download manager. Higher is usually faster on good connections; "
+                     "lower is gentler on slow or shared ones. 1 turns it off.")
+        self._slider(parent, "max_parallel_videos", "Videos at once:", 1, 5,
+                     "How many videos download at the same time. If YouTube says there are "
+                     "too many requests, the app pauses, then automatically downloads fewer "
+                     "at once and retries. All downloads share at most "
+                     f"{MAX_TOTAL_CONNECTIONS} connections in total.")
         self._row_checkbox(parent, "ask_format_per_video", "Ask for the file type of every video",
                            "Shows a pop-up for each link to choose MP4, MKV or WEBM. "
                            "Useful only if you mix file types in one batch.")
